@@ -1,7 +1,6 @@
 name: PR check
 
 on:
-  workflow_dispatch:
   pull_request:
     paths:
       - '**'
