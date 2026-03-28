@@ -1,0 +1,15 @@
+ext {
+    extName = 'Scan Reader'
+    extClass = '.ScanReader'
+    overrideVersionCode = 1
+    isNsfw = true
+    baseUrl = "https://scanreader.net"
+    themePkg = 'mangathemesia'
+}
+
+apply from: "$rootDir/common.gradle"
+
+dependencies {
+    implementation(project(":lib-multisrc:scanreaderfr"))
+    implementation(project(":lib-multisrc:mangathemesia"))
+}
