@@ -1,0 +1,9 @@
+ext {
+    extName = 'Twatt'
+    extClass = '.Twatt'
+    extVersionCode = 0
+    isNsfw = false
+    baseUrl = "https://twatt.fr"
+}
+
+apply from: "$rootDir/common.gradle"
