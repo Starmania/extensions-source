@@ -36,7 +36,8 @@ android {
         targetSdk = AndroidConfig.targetSdk
         applicationIdSuffix = project.parent.name + "." + project.name
         versionCode = theme == null ? extVersionCode : theme.baseVersionCode + overrideVersionCode
-        versionName = "1.4.$versionCode"
+        String forcedVersionName = System.getenv("FORCED_VERSION_NAME")
+        versionName = forcedVersionName?.trim() ? forcedVersionName.trim() : "1.4.$versionCode"
         base {
             archivesName = "tachiyomi-$applicationIdSuffix-v$versionName"
         }

@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+TARGET_REPO_SLUG="${TARGET_REPO_SLUG:-keiyoushi/extensions}"
+
 git config --global user.email "156378334+keiyoushi-bot@users.noreply.github.com"
 git config --global user.name "keiyoushi-bot"
 git status
@@ -9,7 +11,7 @@ if [ -n "$(git status --porcelain)" ]; then
     git commit -m "Update extensions repo"
     git push
 
-    curl https://purge.jsdelivr.net/gh/keiyoushi/extensions@repo/index.min.json
+    curl "https://purge.jsdelivr.net/gh/${TARGET_REPO_SLUG}@repo/index.min.json"
 else
     echo "No changes to commit"
 fi
