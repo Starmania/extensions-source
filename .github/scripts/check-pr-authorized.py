@@ -3,7 +3,7 @@ import os
 import sys
 from pathlib import Path
 
-TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER"}
 
 
 def is_authorized(author: str, association: str, config_path: Path) -> tuple[bool, str]:

@@ -23,7 +23,7 @@ jobs:
       - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.CODEBERG_SSH }}" >> ~/.ssh/id_rsa
+          echo "${{ secrets.TEST_CODEBERG_SSH }}" >> ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
       - name: Mirror repository
         run: |
