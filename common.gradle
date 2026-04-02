@@ -15,7 +15,9 @@ if (theme != null) evaluationDependsOn(theme.path)
 android {
     compileSdk = AndroidConfig.compileSdk
 
-    namespace = "eu.kanade.tachiyomi.extension"
+    String prNumber = System.getenv("PR_NUMBER")?.trim()
+    String packageBase = prNumber ? "dev.kanade.tachiyomi" : "eu.kanade.tachiyomi"
+    namespace = "$packageBase.extension"
 
     sourceSets {
         main {
@@ -42,10 +44,8 @@ android {
             archivesName = "tachiyomi-$applicationIdSuffix-v$versionName"
         }
         assert extClass.startsWith(".")
-        String prNumber = System.getenv("PR_NUMBER")?.trim()
-        String appNameSuffix = prNumber ? " (PR #$prNumber)" : ""
         manifestPlaceholders = [
-                appName : "Tachiyomi: $extName$appNameSuffix",
+                appName : "Tachiyomi: $extName",
                 extClass: extClass,
                 nsfw    : project.ext.find("isNsfw") ? 1 : 0,
         ]
@@ -128,6 +128,61 @@ afterEvaluate {
         // https://stackoverflow.com/a/77745844
         doFirst { appMetadata.asFile.getOrNull()?.write('') }
     }
+}
+
+// Transform source files for dev builds
+String prNumber = System.getenv("PR_NUMBER")?.trim()
+if (prNumber) {
+    tasks.register("transformSourcesForDev") {
+        doFirst {
+            def srcDir = file("src")
+            if (!srcDir.exists()) return
+
+            def prSuffix = " – $prNumber"
+
+            // Find all Kotlin source files
+            srcDir.eachFileRecurse(groovy.io.FileType.FILES) { file ->
+                if (!file.name.endsWith('.kt')) return
+
+                def content = file.text
+                def modified = false
+
+                // Change package declaration from eu.kanade to dev.kanade
+                if (content.contains('package eu.kanade.tachiyomi')) {
+                    content = content.replaceAll(
+                        /(?m)^package eu\.kanade\.tachiyomi/,
+                        'package dev.kanade.tachiyomi'
+                    )
+                    modified = true
+                }
+
+                // Add PR suffix to source name
+                // Pattern 1: override val/var name = "..."
+                if (content =~ /(?m)override\s+(val|var)\s+name\s*=\s*"[^"]*"/) {
+                    content = content.replaceAll(
+                        /(?m)(override\s+(?:val|var)\s+name\s*=\s*"[^"]*)"/,
+                        "\$1$prSuffix\""
+                    )
+                    modified = true
+                }
+                // Pattern 2: Class constructor with string literal as first parameter
+                // Matches: class X : Y(\n    "Name",
+                else if (content =~ /(?ms)class\s+\w+[^{]*:\s*\w+\s*\([^"]*"[^"]+"/){
+                    content = content.replaceAll(
+                        /(?ms)(class\s+\w+[^{]*:\s*\w+\s*\([^"]*"[^"]+)"/,
+                        "\$1$prSuffix\""
+                    )
+                    modified = true
+                }
+
+                if (modified) {
+                    file.text = content
+                }
+            }
+        }
+    }
+
+    preBuild.dependsOn(transformSourcesForDev)
 }
 
 preBuild.dependsOn(writeManifestFile)
