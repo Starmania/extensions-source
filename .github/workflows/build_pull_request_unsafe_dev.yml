@@ -94,6 +94,7 @@ jobs:
           KEY_STORE_PASSWORD: ${{ secrets.TEST_KEY_STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.TEST_KEY_PASSWORD }}
           FORCED_VERSION_NAME: 1.4.99
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           ./gradlew $MODULES
 

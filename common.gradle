@@ -42,8 +42,10 @@ android {
             archivesName = "tachiyomi-$applicationIdSuffix-v$versionName"
         }
         assert extClass.startsWith(".")
+        String prNumber = System.getenv("PR_NUMBER")?.trim()
+        String appNameSuffix = prNumber ? " (PR #$prNumber)" : ""
         manifestPlaceholders = [
-                appName : "Tachiyomi: $extName",
+                appName : "Tachiyomi: $extName$appNameSuffix",
                 extClass: extClass,
                 nsfw    : project.ext.find("isNsfw") ? 1 : 0,
         ]
