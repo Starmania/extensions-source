@@ -17,7 +17,7 @@ android {
 
     String prNumber = System.getenv("PR_NUMBER")?.trim()
     String packageBase = prNumber ? "dev.kanade.tachiyomi" : "eu.kanade.tachiyomi"
-    namespace = "$packageBase.extension"
+    namespace = "${packageBase}.extension"
 
     sourceSets {
         main {
