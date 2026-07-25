@@ -11,7 +11,6 @@ import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.extractNextJs
-import keiyoushi.utils.extractNextJsRsc
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
 import kotlinx.serialization.json.JsonObject
@@ -136,23 +135,25 @@ abstract class AstralManga : HttpSource() {
     override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val url = response.request.url
-        val mangaUuid = url.pathSegments[1]
-        val rscBody = response.body.string()
+        val mangaUuid = response.request.url.pathSegments[1]
 
-        val chapters = parseChapters(rscBody, mangaUuid)
-        if (chapters.isNotEmpty()) return chapters
+        // The payload also carries chapter lists of unrelated entries (carousels), so the chapters
+        // have to be read from the requested entry itself rather than searched for globally.
+        val manga = response.extractNextJs<MangaDto> {
+            it is JsonObject && it["urlId"]?.jsonPrimitive?.contentOrNull == mangaUuid
+        } ?: throw Exception("Title not found")
 
-        // RSC data can be partial on first load; retry with cache-busting
-        val retryUrl = url.newBuilder()
-            .addQueryParameter("_", System.currentTimeMillis().toString())
-            .build()
-        val retryRequest = response.request.newBuilder()
-            .url(retryUrl)
-            .header("Cache-Control", "no-cache")
-            .build()
-        val retryResponse = client.newCall(retryRequest).execute()
-        return parseChapters(retryResponse.body.string(), mangaUuid)
+        val seen = mutableSetOf<String>()
+        return manga.chapters.orEmpty()
+            .filter { seen.add(it.id) }
+            .map { ch ->
+                SChapter.create().apply {
+                    url = "/manga/$mangaUuid/chapter/${ch.id}"
+                    name = "Chapitre ${ch.orderIdString}"
+                    chapter_number = ch.orderId
+                    date_upload = DATE_FORMAT.tryParse(ch.publishDate?.take(19))
+                }
+            }
     }
 
     // ========================== Pages ==========================
@@ -202,29 +203,6 @@ abstract class AstralManga : HttpSource() {
 
         val hasNextPage = (dto.mangas.size >= 12) && (mangas.size < dto.total)
         return MangasPage(mangas, hasNextPage)
-    }
-
-    private fun parseChapters(rscBody: String, mangaUuid: String): List<SChapter> {
-        val manga = rscBody.extractNextJsRsc<MangaDto> {
-            it is JsonObject && it["urlId"]?.jsonPrimitive?.contentOrNull == mangaUuid
-        } ?: return emptyList()
-
-        val chapters = rscBody.extractNextJsRsc<List<RscChapterDto>>()
-            ?: return emptyList()
-
-        val seen = mutableSetOf<String>()
-        return chapters
-            .filter { it.mangaId == manga.id }
-            .filter { seen.add(it.id) }
-            .map { ch ->
-                SChapter.create().apply {
-                    this.url = "/manga/$mangaUuid/chapter/${ch.id}"
-                    name = "Chapitre ${ch.orderIdString}"
-                    chapter_number = ch.orderId
-                    date_upload = DATE_FORMAT.tryParse(ch.publishDate?.take(19))
-                    scanlator = "Astral Manga"
-                }
-            }
     }
 
     /**

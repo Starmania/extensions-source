@@ -28,6 +28,7 @@ class MangaDto(
     val authors: List<NameDto>? = null,
     val artists: List<NameDto>? = null,
     val teams: List<NameDto>? = null,
+    val chapters: List<RscChapterDto>? = null,
 ) {
     fun toSManga(presignS3Key: (String) -> String?): SManga = SManga.create().apply {
         url = "/manga/$urlId"
@@ -83,7 +84,6 @@ class RscChapterDto(
     val id: String,
     val orderId: Float,
     val publishDate: String? = null,
-    val mangaId: String,
 ) {
     val orderIdString: String
         get() = if (orderId % 1 == 0f) orderId.toInt().toString() else orderId.toString()
