@@ -13,26 +13,26 @@ import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
+import keiyoushi.annotation.Source
+import keiyoushi.source.KeiSource
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.OkHttpClient
 import okhttp3.Protocol
-import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.io.ByteArrayOutputStream
 
-class Debug : HttpSource() {
+@Source
+abstract class Debug : KeiSource() {
 
-    override val name = "Mihon Debugger"
-    override val baseUrl = "http://example.com"
-    override val lang = "all"
     override val supportsLatest = false
 
     // ==============================
     // Interceptor for Rendering Text & Preventing 404s
     // ==============================
 
-    override val client = network.client.newBuilder().addInterceptor { chain ->
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addInterceptor { chain ->
         val request = chain.request()
         val httpUrl = request.url
 
@@ -80,7 +80,7 @@ class Debug : HttpSource() {
 
         // Proceed normally for any other requests (like the Active Analysis image endpoints)
         chain.proceed(request)
-    }.build()
+    }
 
     private fun textToBitmap(text: String): Bitmap {
         val textPaint = TextPaint().apply {
@@ -107,10 +107,8 @@ class Debug : HttpSource() {
     // Static Extension Data Routing
     // ==============================
 
-    // Latest Updates Route
-    override fun latestUpdatesRequest(page: Int): Request = GET(baseUrl, headers)
-
-    override fun latestUpdatesParse(response: Response): MangasPage {
+    // Popular Updates Route
+    override suspend fun getPopularManga(page: Int): MangasPage {
         val mangas = listOf(
             SManga.create().apply {
                 title = "Passive Analysis"
@@ -126,33 +124,25 @@ class Debug : HttpSource() {
         return MangasPage(mangas, false)
     }
 
-    // Manga Details Route
-    override fun mangaDetailsRequest(manga: SManga): Request = GET(baseUrl + manga.url, headers)
-
-    override fun mangaDetailsParse(response: Response): SManga {
-        val url = response.request.url.toString()
-        return SManga.create().apply {
+    override suspend fun fetchMangaUpdate(manga: SManga, chapters: List<SChapter>, fetchDetails: Boolean, fetchChapters: Boolean): SMangaUpdate {
+        /*
+        val manga = SManga.create().apply {
             title = if (url.contains("/passive")) "Passive Analysis" else "Active Analysis"
             initialized = true
         }
-    }
+        */
 
-    // Chapter List Route
-    override fun chapterListRequest(manga: SManga): Request = GET(baseUrl + manga.url, headers)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
         val baseInt = System.currentTimeMillis()
-        val rUrl = response.request.url.toString()
         val chapters = mutableListOf<SChapter>()
 
-        if (rUrl.contains("/passive")) {
+        if (manga.url.contains("/passive")) {
             chapters.add(
                 SChapter.create().apply {
                     name = "1. Tls.peet.ws (Rendered Output)"
                     url = "/passive/1/$baseInt"
                 },
             )
-        } else if (rUrl.contains("/active")) {
+        } else if (manga.url.contains("/active")) {
             chapters.add(
                 SChapter.create().apply {
                     name = "1. Tls.peet.ws"
@@ -172,14 +162,13 @@ class Debug : HttpSource() {
                 },
             )
         }
-        return chapters.reversed()
+        return SMangaUpdate(manga, chapters.reversed())
     }
 
     // Page List Route
-    override fun pageListRequest(chapter: SChapter): Request = GET(baseUrl + chapter.url, headers)
-
-    override fun pageListParse(response: Response): List<Page> {
-        val url = response.request.url.toString()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val request = GET(baseUrl + chapter.url, headers)
+        val url = request.url.toString()
         return when {
             url.contains("/passive/1") -> listOf(
                 Page(0, "", "https://tls.peet.ws/api/all#render_text"),
@@ -198,15 +187,11 @@ class Debug : HttpSource() {
         }
     }
 
-    override fun imageUrlParse(response: Response): String = ""
-
     // ==============================
     // Unused Required Overrides
     // ==============================
 
-    override fun popularMangaRequest(page: Int): Request = latestUpdatesRequest(page)
-    override fun popularMangaParse(response: Response): MangasPage = latestUpdatesParse(response)
+    override suspend fun getLatestUpdates(page: Int): MangasPage = MangasPage(emptyList(), false)
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = latestUpdatesRequest(page)
-    override fun searchMangaParse(response: Response): MangasPage = latestUpdatesParse(response)
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = MangasPage(emptyList(), false)
 }
