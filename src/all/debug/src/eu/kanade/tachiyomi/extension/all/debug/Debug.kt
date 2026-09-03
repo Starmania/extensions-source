@@ -16,12 +16,16 @@ import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.source.KeiSource
+import keiyoushi.utils.runWebViewBlocking
+import okhttp3.Call
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.io.ByteArrayOutputStream
+import kotlin.time.Duration.Companion.seconds
 
 @Source
 abstract class Debug : KeiSource() {
@@ -76,6 +80,18 @@ abstract class Debug : KeiSource() {
 
             return@addInterceptor response.newBuilder().code(200)
                 .body(bytes.toResponseBody("image/gif".toMediaTypeOrNull())).build()
+        } else if (httpUrl.encodedFragment == "in_webview") {
+            Log.d("DebugExtension", "Intercepting webview request: ${request.url}")
+
+            getResponseFromWebview(chain.call(), request.url.toString()).let { html ->
+                val bitmap = textToBitmap(html)
+                val stream = ByteArrayOutputStream()
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+
+                return@addInterceptor Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                    .code(200).message("OK")
+                    .body(stream.toByteArray().toResponseBody("image/png".toMediaTypeOrNull())).build()
+            }
         }
 
         // Proceed normally for any other requests (like the Active Analysis image endpoints)
@@ -103,6 +119,35 @@ abstract class Debug : KeiSource() {
         return bitmap
     }
 
+    fun getResponseFromWebview(call: Call, url: String): String {
+        val httpUrl = url.toHttpUrl()
+        val script = httpUrl.queryParameter("script") ?: DUMP_DOM_SCRIPT
+        // Drop the private "script" param and the "#in_webview" marker before navigating.
+        val pageUrl = httpUrl.newBuilder().removeAllQueryParameters("script").fragment(null).build().toString()
+
+        return runWebViewBlocking(call, timeout = 30.seconds) {
+            jsBridge("kei") { resolve(it) }
+            onPageFinished {
+                evaluateJs(script)
+            }
+            loadUrl(pageUrl)
+        }
+    }
+
+    /**
+     * Builds a page url handled by the "in_webview" interceptor branch. With no [script] the
+     * WebView dumps the loaded document instead.
+     */
+    private fun webviewPage(index: Int, pageUrl: String, script: String? = null) = Page(
+        index,
+        "",
+        pageUrl.toHttpUrl().newBuilder()
+            .apply { if (script != null) addQueryParameter("script", script) }
+            .fragment("in_webview")
+            .build()
+            .toString(),
+    )
+
     // ==============================
     // Static Extension Data Routing
     // ==============================
@@ -120,18 +165,16 @@ abstract class Debug : KeiSource() {
                 url = "/active"
                 description = "Triggers endpoints natively. Returns broken images."
             },
+            SManga.create().apply {
+                title = "Internal Webview"
+                url = "/webview"
+                description = "Opens a webview with runWebView() to test the internal webview."
+            },
         )
         return MangasPage(mangas, false)
     }
 
     override suspend fun fetchMangaUpdate(manga: SManga, chapters: List<SChapter>, fetchDetails: Boolean, fetchChapters: Boolean): SMangaUpdate {
-        /*
-        val manga = SManga.create().apply {
-            title = if (url.contains("/passive")) "Passive Analysis" else "Active Analysis"
-            initialized = true
-        }
-        */
-
         val baseInt = System.currentTimeMillis()
         val chapters = mutableListOf<SChapter>()
 
@@ -161,6 +204,19 @@ abstract class Debug : KeiSource() {
                     url = "/active/3/$baseInt"
                 },
             )
+        } else if (manga.url.contains("/webview")) {
+            chapters.add(
+                SChapter.create().apply {
+                    name = "1. Tls.peet.ws (Rendered Output)"
+                    url = "/webview/1/$baseInt"
+                },
+            )
+            chapters.add(
+                SChapter.create().apply {
+                    name = "2. High Entropy Values"
+                    url = "/webview/2/$baseInt"
+                },
+            )
         }
         return SMangaUpdate(manga, chapters.reversed())
     }
@@ -180,8 +236,10 @@ abstract class Debug : KeiSource() {
                 Page(0, "", "https://deviceandbrowserinfo.com/are_you_a_bot"),
                 Page(1, "", "https://fingerprint-scan.com/fpscanner/demo"),
             )
-
             url.contains("/active/3") -> listOf(Page(0, "", "https://google.com"))
+
+            url.contains("/webview/1") -> listOf(webviewPage(0, "https://tls.peet.ws/api/all"))
+            url.contains("/webview/2") -> listOf(webviewPage(0, "https://tls.peet.ws/api/all", HIGH_ENTROPY_SCRIPT))
 
             else -> emptyList()
         }
@@ -194,4 +252,13 @@ abstract class Debug : KeiSource() {
     override suspend fun getLatestUpdates(page: Int): MangasPage = MangasPage(emptyList(), false)
 
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = MangasPage(emptyList(), false)
+
+    companion object {
+        private const val DUMP_DOM_SCRIPT = "(()=>{window.kei.post(document.documentElement.outerHTML)})()"
+
+        private const val HIGH_ENTROPY_SCRIPT =
+            "(async()=>{window.kei.post(JSON.stringify(await navigator.userAgentData.getHighEntropyValues(" +
+                "['architecture','bitness','formFactors','fullVersionList','model','platformVersion'," +
+                "'uaFullVersion','wow64']),null,2))})()"
+    }
 }
