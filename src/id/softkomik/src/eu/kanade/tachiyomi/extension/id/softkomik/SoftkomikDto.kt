@@ -42,7 +42,7 @@ data class ChapterPageImagesDto(
 @Serializable
 data class ChapterPageDataDto(
     val _id: String,
-    val imageSrc: List<String>,
+    val imageSrc: List<String> = emptyList(),
     val storageInter2: Boolean? = false,
 )
 

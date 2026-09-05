@@ -19,6 +19,7 @@ import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.annotation.Source
 import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.parseAs
+import kotlinx.serialization.json.JsonObject
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -203,13 +204,15 @@ abstract class Softkomik : HttpSource() {
 
     override fun pageListParse(response: Response): List<Page> {
         val isRequiredLogin = response.request.url.fragment?.contains(requiredLoginSuffix) == true
-        val data = response.extractNextJs<ChapterPageDataDto>()
+        // imageSrc is frequently absent from the embedded page data (images are then fetched
+        // from the chapter img API below), so it can't be part of the match predicate.
+        val data = response.extractNextJs<ChapterPageDataDto> { it is JsonObject && "created_at" in it && "_id" in it }
             ?: throw Exception("Could not find chapter data")
 
         val imageSrc = data.imageSrc.ifEmpty {
             val slug = response.request.url.pathSegments[0]
             val chapter = response.request.url.pathSegments[2]
-            val urlApi = "$apiUrl/komik/$slug/chapter/$chapter/img/${data._id}"
+            val urlApi = "$apiUrl/komik/$slug/chapter/$chapter/imgs/${data._id}"
 
             val token = getBearerTokenFromCookie()
             if (token == null && isRequiredLogin) {
@@ -359,15 +362,15 @@ abstract class Softkomik : HttpSource() {
         val slug = if (komikIndex != -1) segments.getOrNull(komikIndex + 1) else null
         // chapter list API $apiUrl/komik/${manga.url}/chapter?limit=9999999
         val isChapterListRequest = komikIndex != -1 && segments.getOrNull(komikIndex + 2) == "chapter"
-        // chapter image API $apiUrl/komik/${manga.url}/chapter/${chapter}/img/${data._id}
-        val isChapterImageRequest = isChapterListRequest && segments.contains("img")
+        // chapter image API $apiUrl/komik/${manga.url}/chapter/${chapter}/imgs/${data._id}
+        val isChapterImageRequest = isChapterListRequest && segments.contains("imgs")
 
         val sessionKey = if (isChapterImageRequest) sessionKeyChapterImage else sessionKeyChapterList
 
         val sessionApiUrl = if (isChapterImageRequest) {
-            "$baseUrl/api/session/chapter"
+            "$baseUrl/api/session/chapter/oaisos"
         } else {
-            "$baseUrl/api/session/amsnuy"
+            "$baseUrl/api/session/aksjkas"
         }
         val webViewUrl = if (isChapterImageRequest) {
             val chapterSegment = resolveWebViewChapterSegment(url)
@@ -531,7 +534,7 @@ abstract class Softkomik : HttpSource() {
     private val requiredLoginGenres = listOf("ecchi", "mature")
     private val sessionKeyChapterList = "chapter-list"
     private val sessionKeyChapterImage = "chapter-image"
-    private val apiUrl = "https://v2.softdevices.my.id"
+    private val apiUrl = "https://api.softkomik.org"
     private val coverUrl = "https://cover.softdevices.my.id/softkomik-cover"
     private val userAgentMobileSafariRegex = Regex("""\s*Mobile Safari/\d+(?:\.\d+)*""", RegexOption.IGNORE_CASE)
     private val cdnUrls = listOf(
