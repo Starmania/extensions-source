@@ -49,12 +49,12 @@ abstract class Debug : KeiSource() {
 
         // 2. Intercept the passive analysis to draw the response as an image
         if (httpUrl.encodedFragment == "render_text") {
-            Log.d("DebugExtension", "Intercepting render request: ${request.url}")
+            Log.d(LOG_TAG, "Intercepting render request: ${request.url}")
 
             val response = chain.proceed(request)
 
             val textResponse = response.body.string()
-            Log.d("DebugExtension", "Original text response:\n$textResponse")
+            Log.d(LOG_TAG, "Original text response:\n$textResponse")
 
             val bitmap = textToBitmap(textResponse)
             val stream = ByteArrayOutputStream()
@@ -63,7 +63,7 @@ abstract class Debug : KeiSource() {
             return@addInterceptor response.newBuilder().code(200)
                 .body(stream.toByteArray().toResponseBody("image/png".toMediaTypeOrNull())).build()
         } else if (httpUrl.encodedFragment == "render_gif") {
-            Log.d("DebugExtension", "Intercepting render request: ${request.url}")
+            Log.d(LOG_TAG, "Intercepting render request: ${request.url}")
 
             val response = chain.proceed(request)
 
@@ -81,7 +81,7 @@ abstract class Debug : KeiSource() {
             return@addInterceptor response.newBuilder().code(200)
                 .body(bytes.toResponseBody("image/gif".toMediaTypeOrNull())).build()
         } else if (httpUrl.encodedFragment == "in_webview") {
-            Log.d("DebugExtension", "Intercepting webview request: ${request.url}")
+            Log.d(LOG_TAG, "Intercepting webview request: ${request.url}")
 
             getResponseFromWebview(chain.call(), request.url.toString()).let { html ->
                 val bitmap = textToBitmap(html)
@@ -126,6 +126,7 @@ abstract class Debug : KeiSource() {
         val pageUrl = httpUrl.newBuilder().removeAllQueryParameters("script").fragment(null).build().toString()
 
         return runWebViewBlocking(call, timeout = 30.seconds) {
+            userAgent = headers["User-Agent"]!!
             jsBridge("kei") { resolve(it) }
             onPageFinished {
                 evaluateJs(script)
@@ -225,21 +226,22 @@ abstract class Debug : KeiSource() {
     override suspend fun getPageList(chapter: SChapter): List<Page> {
         val request = GET(baseUrl + chapter.url, headers)
         val url = request.url.toString()
+        val baseInt = url.substringAfterLast("/").toLongOrNull() ?: System.currentTimeMillis()
         return when {
             url.contains("/passive/1") -> listOf(
-                Page(0, "", "https://tls.peet.ws/api/all#render_text"),
-                Page(1, "", "https://tls.peet.ws/api/all#render_gif"),
+                Page(0, "", "https://tls.peet.ws/api/all?baseInt=$baseInt#render_text"),
+                Page(1, "", "https://tls.peet.ws/api/all?baseInt=$baseInt#render_gif"),
             )
 
-            url.contains("/active/1") -> listOf(Page(0, "", "https://tls.peet.ws/api/all"))
+            url.contains("/active/1") -> listOf(Page(0, "", "https://tls.peet.ws/api/all?"))
             url.contains("/active/2") -> listOf(
                 Page(0, "", "https://deviceandbrowserinfo.com/are_you_a_bot"),
                 Page(1, "", "https://fingerprint-scan.com/fpscanner/demo"),
             )
             url.contains("/active/3") -> listOf(Page(0, "", "https://google.com"))
 
-            url.contains("/webview/1") -> listOf(webviewPage(0, "https://tls.peet.ws/api/all"))
-            url.contains("/webview/2") -> listOf(webviewPage(0, "https://tls.peet.ws/api/all", HIGH_ENTROPY_SCRIPT))
+            url.contains("/webview/1") -> listOf(webviewPage(0, "https://tls.peet.ws/api/all?baseInt=$baseInt"))
+            url.contains("/webview/2") -> listOf(webviewPage(0, "https://tls.peet.ws/api/all?baseInt=$baseInt", HIGH_ENTROPY_SCRIPT))
 
             else -> emptyList()
         }
@@ -254,6 +256,8 @@ abstract class Debug : KeiSource() {
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = MangasPage(emptyList(), false)
 
     companion object {
+        private const val LOG_TAG = "DebugExtension"
+
         private const val DUMP_DOM_SCRIPT = "(()=>{window.kei.post(document.documentElement.outerHTML)})()"
 
         private const val HIGH_ENTROPY_SCRIPT =
