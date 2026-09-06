@@ -1,47 +1,74 @@
 package eu.kanade.tachiyomi.extension.id.soulscans
 
-import eu.kanade.tachiyomi.multisrc.mangathemesia.MangaThemesia
+import eu.kanade.tachiyomi.source.model.FilterList
+import eu.kanade.tachiyomi.source.model.MangasPage
+import eu.kanade.tachiyomi.source.model.Page
+import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
-import org.jsoup.nodes.Document
-import java.util.Locale
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.parseAs
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 
 @Source
-abstract class SoulScans : MangaThemesia() {
+abstract class SoulScans : KeiSource() {
 
-    override val hasProjectPage = true
+    private suspend fun getMangaList(url: HttpUrl): MangasPage {
+        val result = client.get(url, headers).parseAs<MangaListResponseDto>()
 
-    override fun searchMangaSelector() = ".listupd .bs .bsx:not(:has(.novelabel))"
-
-    override fun mangaDetailsParse(document: Document) = SManga.create().apply {
-        document.selectFirst(seriesDetailsSelector)?.let { seriesDetails ->
-            title = seriesDetails.selectFirst(seriesTitleSelector)?.text().orEmpty()
-            artist = seriesDetails.selectFirst(seriesArtistSelector)?.ownText().removeEmptyPlaceholder()
-            author = seriesDetails.selectFirst(seriesAuthorSelector)?.ownText().removeEmptyPlaceholder()
-            description = seriesDetails.select(seriesDescriptionSelector).joinToString("\n") { it.text() }.trim()
-            // Add alternative name to manga description
-            val altName = seriesDetails.selectFirst(seriesAltNameSelector)?.ownText().takeIf { it.isNullOrBlank().not() }
-            altName?.let {
-                description = "$description\n\n$altNamePrefix$altName".trim()
-            }
-            val genres = seriesDetails.select(seriesGenreSelector).map { it.text() }.toMutableList()
-            // Add series type (manga/manhwa/manhua/other) to genre
-            seriesDetails.selectFirst(seriesTypeSelector)?.ownText().takeIf { it.isNullOrBlank().not() }?.let { genres.add(it) }
-            genre = genres.map { genre ->
-                genre.lowercase(Locale.forLanguageTag(lang)).replaceFirstChar { char ->
-                    if (char.isLowerCase()) {
-                        char.titlecase(Locale.forLanguageTag(lang))
-                    } else {
-                        char.toString()
-                    }
-                }
-            }
-                .joinToString { it.trim() }
-
-            status = seriesDetails.selectFirst(seriesStatusSelector)?.text().parseStatus()
-            seriesDetails.select(seriesThumbnailSelector).firstOrNull()?.let { thumbnail_url = it.imgAttr() }
-        }
+        val page = url.queryParameter("page")!!.toInt()
+        return MangasPage(result.data.map { it.toSManga() }, page < result.totalPages)
     }
 
-    override val pageSelector = "div#readerarea img:not([src*='.gif'])"
+    override suspend fun getPopularManga(page: Int): MangasPage = getMangaList(searchUrl(page, sort = "popular"))
+
+    override suspend fun getLatestUpdates(page: Int): MangasPage = getMangaList(searchUrl(page, sort = "latest"))
+
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = getMangaList(searchUrl(page, query = query))
+
+    private fun searchUrl(page: Int, query: String = "", sort: String = "latest") = baseUrl.toHttpUrl()
+        .newBuilder()
+        .addPathSegments("api/search")
+        .addQueryParameter("type", "COMIC")
+        .addQueryParameter("limit", "20")
+        .addQueryParameter("page", page.toString())
+        .apply {
+            if (query.isNotBlank()) {
+                addQueryParameter("q", query)
+            } else {
+                addQueryParameter("sort", sort)
+                addQueryParameter("order", "desc")
+            }
+        }
+        .build()
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val slug = url.pathSegments.lastOrNull { it.isNotBlank() } ?: return null
+        return fetchSeriesDetail(slug).toSManga()
+    }
+
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val detail = fetchSeriesDetail(manga.url.substringAfterLast("/"))
+
+        return SMangaUpdate(detail.toSManga(), detail.toSChapterList())
+    }
+
+    private suspend fun fetchSeriesDetail(slug: String) = client.get("$baseUrl/api/series/comic/$slug", headers).parseAs<SeriesDetailDto>()
+
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val path = chapter.url.removePrefix("/comic/")
+        val (seriesSlug, chapterSlug) = path.split("/chapter/")
+
+        return client.get("$baseUrl/api/series/comic/$seriesSlug/chapter/$chapterSlug", headers)
+            .parseAs<ChapterPagesResponseDto>()
+            .toPageList()
+    }
 }
