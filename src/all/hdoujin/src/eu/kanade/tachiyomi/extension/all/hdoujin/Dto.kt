@@ -13,11 +13,11 @@ class MangaDetail(
     val id: Int,
     val key: String,
     val title: String,
-    val title_short: String?,
+    val title_short: String? = null,
     val created_at: Long = 0L,
-    val updated_at: Long?,
-    val subtitle: String?,
-    val subtitle_short: String?,
+    val updated_at: Long? = null,
+    val subtitle: String? = null,
+    val subtitle_short: String? = null,
     val thumbnails: Thumbnails,
     val tags: List<Tag> = emptyList(),
 ) {
@@ -165,7 +165,7 @@ class Entries(
         val id: Int,
         val key: String,
         val title: String,
-        val subtitle: String?,
+        val subtitle: String? = null,
         val thumbnail: Thumbnail,
     ) {
         fun toSManga() = SManga.create().apply {
