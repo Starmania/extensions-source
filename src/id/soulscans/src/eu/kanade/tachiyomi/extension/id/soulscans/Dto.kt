@@ -28,7 +28,12 @@ class MangaListItemDto(
 }
 
 @Serializable
-class GenreDto(private val name: String) {
+class GenreDto(
+    private val slug: String,
+    private val name: String,
+) {
+    fun toPair() = name to slug
+
     override fun toString() = name
 }
 
