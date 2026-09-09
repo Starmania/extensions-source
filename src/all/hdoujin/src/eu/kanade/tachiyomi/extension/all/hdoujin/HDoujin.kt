@@ -4,45 +4,38 @@ import CategoryFilter
 import SelectFilter
 import TagType
 import TextFilter
-import android.annotation.SuppressLint
-import android.app.Application
-import android.os.Handler
-import android.os.Looper
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.extension.all.hdoujin.Entries.Entry
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
-import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import getFilters
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.getPreferences
-import keiyoushi.utils.jsonInstance
-import kotlinx.serialization.decodeFromString
+import keiyoushi.utils.parseAs
+import keiyoushi.utils.runWebViewBlocking
+import kotlinx.serialization.json.JsonElement
+import okhttp3.Call
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
+import okhttp3.RequestBody.Companion.toRequestBody
 import okio.IOException
-import rx.Observable
-import uy.kohesive.injekt.injectLazy
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+import kotlin.time.Duration.Companion.seconds
 
 @Source
 abstract class HDoujin :
-    HttpSource(),
+    KeiSource(),
     ConfigurableSource {
 
     private val siteLang: String
@@ -55,7 +48,6 @@ abstract class HDoujin :
             else -> lang
         }
 
-    override val supportsLatest = true
     private val preferences = getPreferences()
     private fun quality() = preferences.getString(PREF_IMAGE_RES, "1280")!!
     private fun remadd() = preferences.getBoolean(PREF_REM_ADD, false)
@@ -98,49 +90,28 @@ abstract class HDoujin :
     private val baseApiUrl: String get() = "https://api." + baseUrl.removePrefix("https://")
     private val bookApiUrl: String get() = "$baseApiUrl/books"
 
-    override fun headersBuilder() = super.headersBuilder()
-        .set("Referer", "$baseUrl/")
-        .set("Origin", baseUrl)
+    private var cachedClearance: String? = null
 
-    private val context: Application by injectLazy()
-    private val handler by lazy { Handler(Looper.getMainLooper()) }
-    private var _clearance: String? = null
-
-    @SuppressLint("SetJavaScriptEnabled")
-    fun getClearance(): String? {
-        _clearance?.also { return it }
-        val latch = CountDownLatch(1)
-        handler.post {
-            val webview = WebView(context)
-            with(webview.settings) {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                databaseEnabled = true
-                blockNetworkImage = true
-            }
-            webview.webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    view!!.evaluateJavascript("window.localStorage.getItem('clearance')") { clearance ->
-                        webview.stopLoading()
-                        webview.destroy()
-                        _clearance = clearance.takeUnless { it == "null" }?.removeSurrounding("\"")
-                        latch.countDown()
-                    }
+    private fun getClearance(call: Call): String? = cachedClearance ?: try {
+        runWebViewBlocking<String?>(call, timeout = 10.seconds) {
+            onPageFinished {
+                evaluateJs("localStorage.getItem('clearance')") { value ->
+                    resolve(value.parseAs<String?>())
                 }
             }
-            webview.loadDataWithBaseURL("$baseUrl/", " ", "text/html", null, null)
-        }
-        latch.await(10, TimeUnit.SECONDS)
-        return _clearance
+            loadData(baseUrl, "")
+        }.also { cachedClearance = it }
+    } catch (_: Exception) {
+        null
     }
+
     private val clearanceClient = network.client.newBuilder()
         .addInterceptor { chain ->
             val request = chain.request()
-            val url = request.url
-            val clearance = getClearance()
+            val clearance = getClearance(chain.call())
                 ?: throw IOException("Open webview to refresh token")
 
-            val newUrl = url.newBuilder()
+            val newUrl = request.url.newBuilder()
                 .setQueryParameter("crt", clearance)
                 .build()
             val newRequest = request.newBuilder()
@@ -153,55 +124,41 @@ abstract class HDoujin :
                 return@addInterceptor response
             }
             response.close()
-            _clearance = null
+            cachedClearance = null
             throw IOException("Open webview to refresh token")
         }
         .rateLimit(3)
         .build()
 
-    override fun popularMangaRequest(page: Int): Request = GET(
-        bookApiUrl.toHttpUrl().newBuilder().apply {
-            addQueryParameter("sort", "8")
+    // ============================ Popular + Latest =========================
+
+    override suspend fun getPopularManga(page: Int) = getMangaList(page, sort = "8")
+
+    override suspend fun getLatestUpdates(page: Int) = getMangaList(page)
+
+    private suspend fun getMangaList(page: Int, sort: String? = null): MangasPage {
+        val url = bookApiUrl.toHttpUrl().newBuilder().apply {
+            sort?.let { addQueryParameter("sort", it) }
             addQueryParameter("page", page.toString())
 
             val tags = getTagsPreference()
-            val terms: MutableList<String> = mutableListOf()
+            val terms = mutableListOf<String>()
             if (lang != "all") terms += "language:\"^$siteLang\""
             if (tags.isNotBlank()) terms += tags
 
             if (terms.isNotEmpty()) addQueryParameter("s", terms.joinToString(" "))
-        }.build(),
-        headers,
-    )
+        }.build()
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val data = response.parseAs<Entries>()
-
-        with(data) {
-            return MangasPage(
-                mangas = entries.map(Entry::toSManga),
-                hasNextPage = limit * page < total,
-            )
-        }
+        val data = client.get(url).parseAs<Entries>()
+        return MangasPage(
+            mangas = data.entries.map(Entry::toSManga),
+            hasNextPage = data.limit * data.page < data.total,
+        )
     }
 
-    override fun latestUpdatesRequest(page: Int) = GET(
-        bookApiUrl.toHttpUrl().newBuilder().apply {
-            addQueryParameter("page", page.toString())
+    // ================================ Search ================================
 
-            val tags = getTagsPreference()
-            val terms: MutableList<String> = mutableListOf()
-            if (lang != "all") terms += "language:\"^$siteLang\""
-            if (tags.isNotBlank()) terms += tags
-
-            if (terms.isNotEmpty()) addQueryParameter("s", terms.joinToString(" "))
-        }.build(),
-        headers,
-    )
-
-    override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val url = bookApiUrl.toHttpUrl().newBuilder().apply {
             val terms = mutableListOf(query.trim())
 
@@ -254,14 +211,72 @@ abstract class HDoujin :
             addQueryParameter("page", page.toString())
         }.build()
 
-        return GET(url, headers)
+        val data = client.get(url).parseAs<Entries>()
+        return MangasPage(
+            mangas = data.entries.map(Entry::toSManga),
+            hasNextPage = data.limit * data.page < data.total,
+        )
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = popularMangaParse(response)
+    override fun getFilterList(data: JsonElement?): FilterList = getFilters()
 
-    override fun getFilterList(): FilterList = getFilters()
+    // ============================ Details + Chapters ========================
 
-    private fun getImagesByMangaData(entry: MangaData, entryId: String, entryKey: String): Pair<ImagesInfo, String> {
+    override fun getMangaUrl(manga: SManga) = "$baseUrl/g/${manga.url}"
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host) return null
+        val segments = url.pathSegments
+        val index = segments.indexOf("g")
+        if (index == -1 || index + 2 >= segments.size) return null
+
+        val manga = SManga.create().apply { this.url = "${segments[index + 1]}/${segments[index + 2]}" }
+        return fetchMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false).manga
+    }
+
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val mangaDetail = client.get("$bookApiUrl/detail/${manga.url}").parseAs<MangaDetail>()
+
+        return SMangaUpdate(
+            manga = mangaDetail.toSManga().apply {
+                setUrlWithoutDomain("${mangaDetail.id}/${mangaDetail.key}")
+                title = if (remadd()) {
+                    mangaDetail.title_short ?: mangaDetail.title.shortenTitle()
+                } else {
+                    mangaDetail.title
+                }
+            },
+            chapters = listOf(
+                SChapter.create().apply {
+                    name = "Chapter"
+                    url = "${mangaDetail.id}/${mangaDetail.key}"
+                    date_upload = mangaDetail.updated_at ?: mangaDetail.created_at
+                },
+            ),
+        )
+    }
+
+    private val shortenTitleRegex = Regex("""(\[[^]]*]|[({][^)}]*[)}])""")
+    private fun String.shortenTitle() = replace(shortenTitleRegex, "").trim()
+
+    // ================================= Pages =================================
+
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val (entryId, entryKey) = chapter.url.split("/", limit = 2)
+        val mangaData = clearanceClient.post("$bookApiUrl/detail/${chapter.url}", headers, "".toRequestBody()).parseAs<MangaData>()
+        val (imagesInfo, realQuality) = getImagesByMangaData(mangaData, entryId, entryKey)
+
+        return imagesInfo.entries.mapIndexed { index, image ->
+            Page(index, imageUrl = "${imagesInfo.base}/${image.path}?w=$realQuality")
+        }
+    }
+
+    private suspend fun getImagesByMangaData(entry: MangaData, entryId: String, entryKey: String): Pair<ImagesInfo, String> {
         val data = entry.data
         fun getIPK(
             ori: DataKey?,
@@ -293,68 +308,12 @@ abstract class HDoujin :
             else -> "0"
         }
 
-        val imagesResponse = clearanceClient.newCall(GET("$bookApiUrl/data/$entryId/$entryKey/$id/$public_key/$realQuality", headers)).execute()
-        val images = imagesResponse.parseAs<ImagesInfo>() to realQuality
-        return images
+        val imagesInfo = clearanceClient.get("$bookApiUrl/data/$entryId/$entryKey/$id/$public_key/$realQuality", headers).parseAs<ImagesInfo>()
+        return imagesInfo to realQuality
     }
 
-    private val shortenTitleRegex = Regex("""(\[[^]]*]|[({][^)}]*[)}])""")
-    private fun String.shortenTitle() = replace(shortenTitleRegex, "").trim()
+    // ================================ Settings ================================
 
-    override fun mangaDetailsRequest(manga: SManga) = GET("$bookApiUrl/detail/${manga.url}", headers)
-    override fun mangaDetailsParse(response: Response): SManga {
-        val mangaDetail = response.parseAs<MangaDetail>()
-        with(mangaDetail) {
-            return toSManga().apply {
-                setUrlWithoutDomain("${mangaDetail.id}/${mangaDetail.key}")
-                title = if (remadd()) {
-                    title_short
-                        ?: mangaDetail.title.shortenTitle()
-                } else {
-                    mangaDetail.title
-                }
-            }
-        }
-    }
-
-    override fun getMangaUrl(manga: SManga) = "$baseUrl/g/${manga.url}"
-    override fun chapterListRequest(manga: SManga) = GET("$bookApiUrl/detail/${manga.url}", headers)
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val manga = response.parseAs<MangaDetail>()
-        return listOf(
-            SChapter.create().apply {
-                name = "Chapter"
-                url = "${manga.id}/${manga.key}"
-                date_upload = (manga.updated_at ?: manga.created_at)
-            },
-        )
-    }
-
-    override fun pageListRequest(chapter: SChapter): Request = POST("$bookApiUrl/detail/${chapter.url}", headers)
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = clearanceClient.newCall(pageListRequest(chapter))
-        .asObservableSuccess()
-        .map { response ->
-            pageListParse(response)
-        }
-    override fun pageListParse(response: Response): List<Page> {
-        val mangaData = response.parseAs<MangaData>()
-        val url = response.request.url.toString()
-        val matches = Regex("""/detail/(\d+)/([a-z\d]+)""").find(url)
-        if (matches == null || matches.groupValues.size < 3) return emptyList()
-        val imagesInfo = getImagesByMangaData(mangaData, matches.groupValues[1], matches.groupValues[2])
-
-        return imagesInfo.first.entries.mapIndexed { index, image ->
-            Page(index, imageUrl = "${imagesInfo.first.base}/${image.path}?w=${imagesInfo.second}")
-        }
-    }
-
-    override fun imageRequest(page: Page): Request = GET(page.imageUrl!!, headers)
-
-    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
-
-    private inline fun <reified T> Response.parseAs(): T = jsonInstance.decodeFromString(body.string())
-
-    // Settings
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         ListPreference(screen.context).apply {
             key = PREF_IMAGE_RES
@@ -387,6 +346,7 @@ abstract class HDoujin :
                 "Excluding: ${alwaysExcludeTags()}"
         }.also(screen::addPreference)
     }
+
     companion object {
         private const val PREF_REM_ADD = "pref_remove_additional"
         private const val PREF_IMAGE_RES = "pref_image_quality"
