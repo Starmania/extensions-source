@@ -42,8 +42,9 @@ class PageDto(
     private val src: String,
     private val fallback: String?,
 ) {
-    fun toPage(index: Int) = Page(
-        index = index,
-        url = if (!fallback.isNullOrBlank()) "$src#fallback=$fallback" else src,
-    )
+    fun toPage(index: Int) = if (fallback.isNullOrBlank()) {
+        Page(index = index, imageUrl = src)
+    } else {
+        Page(index = index, url = "$src#fallback=$fallback")
+    }
 }
