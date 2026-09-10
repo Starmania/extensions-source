@@ -324,7 +324,7 @@ abstract class IkigaiMangas :
                 .build()
             document = client.newCall(newRequest).execute().asJsoup()
         }
-        return document.select("section div.img > img").mapIndexed { i, element ->
+        return document.select("img[alt^=Página]").mapIndexed { i, element ->
             Page(i, imageUrl = element.attr("abs:src"))
         }
     }
