@@ -124,6 +124,7 @@ class ReleaseDto(
 @Serializable
 class PageListDto(
     @SerialName("storage_key") val storageKey: String,
+    @SerialName("media_token") val mediaToken: String? = null,
     val pages: List<PageDto>,
 )
 

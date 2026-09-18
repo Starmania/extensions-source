@@ -17,6 +17,7 @@ import keiyoushi.utils.toJsonRequestBody
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import okhttp3.Headers
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.ByteArrayOutputStream
 import java.math.BigInteger
@@ -40,7 +41,7 @@ import javax.crypto.spec.SecretKeySpec
 abstract class Dilar : KeiSource() {
     override fun Headers.Builder.configureHeaders(): Headers.Builder = apply {
         add("X-DH-Pub", clientPubB64)
-        add("X-Crypto-Caps", "1,2,3,4,5,6,7,8,9")
+        add("X-Crypto-Caps", "1,2,3,4,5,6,7,8,9,10,11,12")
     }
 
     // Popular
@@ -113,13 +114,19 @@ abstract class Dilar : KeiSource() {
         val chapterUrl = "$baseUrl/api/chapters/${chapter.url.substringAfterLast("#")}"
         val body = "{}".toRequestBody(JSON_MEDIA_TYPE)
         val unlock = client.post("$chapterUrl/unlock/free", body).parseAs<UnlockDto>()
-        val chapterHeaders = headers.newBuilder().set("X-Unlock-Free-Chapter", unlock.token).build()
+        val chapterHeaders = headers.newBuilder()
+            .set("X-Unlock-Free-Chapter", unlock.token)
+            // The origin answers 403 when the Referer is the bare site root, so send the
+            // reader page the browser would be on.
+            .set("Referer", getChapterUrl(chapter).toHttpUrl().toString())
+            .build()
         val encrypted = client.get(chapterUrl, chapterHeaders).parseAs<EncryptedResponseDto>()
 
         val data = decrypt(encrypted).parseAs<PageListDto>()
+        val token = data.mediaToken?.let { "?t=$it" }.orEmpty()
         return data.pages.sortedBy { it.order }
             .mapIndexed { index, page ->
-                Page(index, imageUrl = "$baseUrl/uploads/releases/${data.storageKey}/hq/${page.url}")
+                Page(index, imageUrl = "$baseUrl/uploads/releases/${data.storageKey}/hq/${page.url}$token")
             }
     }
 
@@ -179,7 +186,8 @@ abstract class Dilar : KeiSource() {
             }
 
             7 -> {
-                hkdfSha256(
+                hkdf(
+                    algorithm = "HmacSHA256",
                     ikm = iv,
                     salt = serverPubRaw,
                     info = "dilar.response.ecies.v7.salt".toByteArray(),
@@ -213,25 +221,111 @@ abstract class Dilar : KeiSource() {
                 ).copyOfRange(0, 32) to "dilar.response.ecies.v9|${data.e}|${ sha256(iv).toHex().take(16)}".toByteArray()
             }
 
+            10 -> {
+                hash(
+                    "SHA-512",
+                    joinBytes(
+                        u16(clientPubRaw.size),
+                        clientPubRaw,
+                        u16(serverPubRaw.size),
+                        serverPubRaw,
+                        u16(iv.size),
+                        iv,
+                    ),
+                ) to "dilar.response.ecies.v10|${data.e}|${hash("SHA-512", iv).toHex().take(24)}".toByteArray()
+            }
+
+            11 -> {
+                hmac(
+                    key = serverPubRaw,
+                    data = joinBytes(
+                        u16(iv.size),
+                        iv,
+                        u16(clientPubRaw.size),
+                        clientPubRaw,
+                    ),
+                    algorithm = "HmacSHA512",
+                ) to "dilar.response.ecies.v11|${data.e}|${hash("SHA-384", iv).toBase64Url().take(22)}".toByteArray()
+            }
+
+            12 -> {
+                hmac(
+                    key = clientPubRaw,
+                    data = joinBytes(
+                        u16(serverPubRaw.size),
+                        serverPubRaw,
+                        u16(iv.size),
+                        iv,
+                    ),
+                    algorithm = "HmacSHA512",
+                ).copyOfRange(0, 32) to
+                    "dilar.response.ecies.v12|${data.e}|${sha256(joinBytes(u16(iv.size), iv)).toBase64Url().take(22)}".toByteArray()
+            }
+
             else -> error("Unsupported encryption protocol version: ${data.v}")
         }
 
-        val key = hkdfSha256(
+        val hmacAlgorithm = when (data.v) {
+            10, 11 -> "HmacSHA512"
+            12 -> "HmacSHA384"
+            else -> "HmacSHA256"
+        }
+
+        // From v11 the GCM nonce is derived alongside the key; the transmitted iv only feeds the KDF.
+        val derivedNonce = data.v >= 11
+        val okm = hkdf(
+            algorithm = hmacAlgorithm,
             ikm = sharedSecret,
             salt = salt,
             info = info,
-            length = 32,
+            length = if (derivedNonce) 44 else 32,
         )
+        val key = okm.copyOf(32)
+        val nonce = if (derivedNonce) okm.copyOfRange(32, 44) else iv
 
         val ct = Base64.decode(data.ct, Base64.URL_SAFE)
         val tag = Base64.decode(data.tag, Base64.URL_SAFE)
 
         val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
-            init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
+            init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
+            if (data.v == 12) {
+                val label = "dilar.response.ecies.v12".toByteArray()
+                val version = data.v.toString().toByteArray()
+                val epoch = data.e.toString().toByteArray()
+                val ctLength = u32(ct.size)
+                updateAAD(
+                    sha256(
+                        joinBytes(
+                            u16(label.size),
+                            label,
+                            u16(version.size),
+                            version,
+                            u16(epoch.size),
+                            epoch,
+                            u16(serverPubRaw.size),
+                            serverPubRaw,
+                            u16(iv.size),
+                            iv,
+                            u16(ctLength.size),
+                            ctLength,
+                        ),
+                    ),
+                )
+            }
         }
 
         return cipher.doFinal(ct + tag).toString(Charsets.UTF_8)
     }
+
+    private fun u32(n: Int): ByteArray = byteArrayOf(
+        ((n ushr 24) and 0xFF).toByte(),
+        ((n ushr 16) and 0xFF).toByte(),
+        ((n ushr 8) and 0xFF).toByte(),
+        (n and 0xFF).toByte(),
+    )
+
+    private fun ByteArray.toBase64Url(): String =
+        Base64.encodeToString(this, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
 
     private fun u16(n: Int): ByteArray = byteArrayOf(((n shr 8) and 0xFF).toByte(), (n and 0xFF).toByte())
 
@@ -284,17 +378,19 @@ abstract class Dilar : KeiSource() {
         init(SecretKeySpec(key, algorithm))
     }.doFinal(data)
 
-    // HKDF-SHA256
+    // HKDF
 
-    private fun sha256(data: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(data)
+    private fun hash(algorithm: String, data: ByteArray): ByteArray = MessageDigest.getInstance(algorithm).digest(data)
 
-    private fun hkdfSha256(ikm: ByteArray, salt: ByteArray, info: ByteArray, length: Int): ByteArray {
-        val prk = hmac(salt, ikm)
+    private fun sha256(data: ByteArray): ByteArray = hash("SHA-256", data)
+
+    private fun hkdf(algorithm: String, ikm: ByteArray, salt: ByteArray, info: ByteArray, length: Int): ByteArray {
+        val prk = hmac(salt, ikm, algorithm)
         val okm = ByteArrayOutputStream()
         var t = ByteArray(0)
         var counter = 1
         while (okm.size() < length) {
-            t = hmac(prk, t + info + byteArrayOf(counter.toByte()))
+            t = hmac(prk, t + info + byteArrayOf(counter.toByte()), algorithm)
             okm.write(t)
             counter++
         }
