@@ -100,7 +100,7 @@ abstract class ComicHubFree : HttpSource() {
         val seriesInfoElement = infoElement.selectFirst("div.series-info")
         val seriesDescriptionElement = infoElement.selectFirst("div#film-content")
 
-        val authorElement = seriesInfoElement?.select("dt:contains(Authors:) + dd")
+        val authorElement = seriesInfoElement?.select("dt:contains(Author:) + dd")
         val statusElement = seriesInfoElement?.select("dt:contains(Status:) + dd")
 
         val image = seriesInfoElement?.selectFirst("img")
