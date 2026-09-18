@@ -13,6 +13,7 @@ import keiyoushi.utils.tryParse
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -23,8 +24,6 @@ abstract class Niadd : HttpSource() {
     override val supportsLatest = true
 
     companion object {
-        private val ALL_IMGS_URL_REGEX = Regex("""all_imgs_url\s*:\s*\[([\s\S]*?)\]""")
-        private val CLEAN_IMG_URL_REGEX = Regex("""["'\s]""")
         private val CHAPTER_NUMBER_REGEX = Regex("""Capítulo\s+(\d+(\.\d+)?)""")
     }
 
@@ -177,75 +176,27 @@ abstract class Niadd : HttpSource() {
     }
 
     // Pages
+    // Like ninemanga, the site serves a chapter either one image per page ("<id>-<n>.html") or
+    // ten images per page ("<id>-10-<n>.html"). Only the latter is worth scraping: the single
+    // image pages re-sign every image URL per request, so they cannot even be de-duplicated.
+    override fun pageListRequest(chapter: SChapter): Request {
+        val chapterId = chapter.url.removeSuffix("/").removeSuffix(".html")
+        return GET("$baseUrl$chapterId-10-1.html", headers)
+    }
+
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
-        val pages = mutableListOf<Page>()
-        val currentUrl = document.location()
-        val html = document.html()
+        val imageUrls = pageImageUrls(document).toMutableList()
 
-        if (html.contains("all_imgs_url")) {
-            val match = ALL_IMGS_URL_REGEX.find(html)
-            if (match != null) {
-                val content = match.groupValues[1]
-                val urls = content.split(",")
-                    .map { it.replace(CLEAN_IMG_URL_REGEX, "") }
-                    .filter { it.startsWith("http") }
-
-                urls.forEachIndexed { i, url ->
-                    pages.add(Page(i, currentUrl, imageUrl = url))
-                }
-                if (pages.isNotEmpty()) return pages
+        document.select("select.sl-page option").drop(1).forEach { option ->
+            val groupUrl = option.absUrl("value")
+            client.newCall(GET(groupUrl, headers)).execute().use { groupResponse ->
+                imageUrls += pageImageUrls(groupResponse.asJsoup())
             }
         }
 
-        val sourceButton = document.selectFirst("a.cool-blue.vision-button")
-        if (sourceButton != null) {
-            val sourceUrl = sourceButton.attr("abs:href")
-            val requestHeaders = headersBuilder()
-                .add("Referer", currentUrl)
-                .build()
-
-            return client.newCall(GET(sourceUrl, requestHeaders)).execute().use { resp ->
-                if (!resp.isSuccessful) throw Exception("Failed to follow redirect: ${resp.code}")
-                pageListParse(resp)
-            }
-        }
-
-        document.select("div.pic_box img, div.reading-content img").forEach { img ->
-            val url = img.attr("abs:src")
-            if (url.isNotEmpty() && !url.contains("cover") && !url.contains("logo")) {
-                pages.add(Page(pages.size, currentUrl, imageUrl = url))
-            }
-        }
-
-        val otherSubPages = document.select("select.sl-page option")
-            .map { it.attr("value") }
-            .filter { it.isNotEmpty() && !currentUrl.contains(it) }
-
-        if (otherSubPages.isNotEmpty()) {
-            otherSubPages.forEach { subPath ->
-                val subUrl = if (subPath.startsWith("http")) subPath else baseUrl + subPath
-                try {
-                    client.newCall(GET(subUrl, headers)).execute().use { resp ->
-                        val subDoc = resp.asJsoup()
-                        subDoc.select("div.pic_box img, div.reading-content img").forEach { img ->
-                            val imgUrl = img.attr("abs:src")
-                            if (imgUrl.isNotEmpty() && !imgUrl.contains("cover") && !pages.any { it.imageUrl == imgUrl }) {
-                                pages.add(Page(pages.size, subUrl, imageUrl = imgUrl))
-                            }
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
-        }
-
-        return pages
+        return imageUrls.mapIndexed { i, imageUrl -> Page(i, imageUrl = imageUrl) }
     }
 
-    override fun imageRequest(page: Page): Request {
-        val imgHeaders = headersBuilder()
-            .add("Referer", page.url)
-            .build()
-        return GET(page.imageUrl!!, imgHeaders)
-    }
+    private fun pageImageUrls(document: Document): List<String> = document.select("div.pic_box img.manga_pic").map { it.absUrl("src") }
 }
