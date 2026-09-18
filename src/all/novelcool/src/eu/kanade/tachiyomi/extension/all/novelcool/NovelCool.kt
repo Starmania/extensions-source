@@ -22,10 +22,8 @@ import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonRequestBody
 import keiyoushi.utils.tryParse
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.select.Elements
 import rx.Observable
@@ -46,12 +44,6 @@ abstract class NovelCool :
     override val client = network.client.newBuilder()
         .rateLimit(1)
         .build()
-
-    private val pageClient by lazy {
-        client.newBuilder()
-            .addInterceptor(::jsRedirect)
-            .build()
-    }
 
     private val preference by getPreferencesLazy()
 
@@ -236,60 +228,25 @@ abstract class NovelCool :
 
     private fun String.parseDate(): Long = DATE_FORMATTER.tryParse(this)
 
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = pageClient.newCall(pageListRequest(chapter))
-        .asObservableSuccess()
-        .map(::pageListParse)
-
-    override fun pageListRequest(chapter: SChapter): Request = super.pageListRequest(chapter).newBuilder()
-        .addHeader("Referer", baseUrl)
-        .build()
+    // Without an Accept header (OkHttp sends none) the site serves chapter pages directly; with
+    // one, as a browser or WebView sends, it 302s into a chain of partner domains instead. The
+    // "-10-N.html" form is the site's own "load 10 images per page" view, the largest it accepts.
+    override fun pageListRequest(chapter: SChapter): Request = GET("$baseUrl${chapter.url.removeSuffix("/")}-10-1.html", headers)
 
     override fun pageListParse(response: Response): List<Page> {
-        var doc = response.asJsoup()
+        val firstPage = response.asJsoup()
+        val otherPages = firstPage.selectFirst("select.sl-page")
+            ?.select("option")
+            .orEmpty()
+            .drop(1)
+            .map { client.newCall(GET(it.attr("value"), headers)).execute().asJsoup() }
 
-        // Chapter pages redirect (HTTP 302) to an intermediate "choose a source" page on a
-        // partner domain (e.g. techsmartideas.com). That page contains a.vision-button links
-        // which point to the actual image server (e.g. financemasterpro.com). This is the
-        // same shared infrastructure used by NineAnime.
-        val serverUrl = doc.selectFirst("a.vision-button")?.attr("abs:href")
-
-        if (serverUrl != null) {
-            val serverHeaders = headers.newBuilder()
-                .set("Referer", doc.baseUri())
-                .build()
-            doc = pageClient.newCall(GET(serverUrl, serverHeaders)).execute().asJsoup()
-        }
-
-        // Parse all_imgs_url from the script using a robust approach: extract the array
-        // content as a string and then find all quoted http URLs within it. This avoids
-        // fragile JSON parsing and trailing-comma issues in the original JS array.
-        val scriptData = doc.select("script:containsData(all_imgs_url)").firstOrNull()?.data()
-
-        if (scriptData != null) {
-            val arrayContent = scriptData
-                .substringAfter("all_imgs_url: [")
-                .substringBefore("]")
-            val images = imageUrlRegex.findAll(arrayContent)
-                .map { it.groupValues[1].replace("\\/", "/") }
-                .toList()
-
-            if (images.isNotEmpty()) {
-                return images.mapIndexed { idx, img -> Page(idx, imageUrl = img) }
-            }
-        }
-
-        return singlePageParse(doc)
+        return (listOf(firstPage) + otherPages)
+            .flatMap { it.select("img.mangaread-manga-pic") }
+            .mapIndexed { idx, img -> Page(idx, imageUrl = img.attr("abs:src")) }
     }
 
-    private fun singlePageParse(document: Document): List<Page> = document.selectFirst(".mangaread-pagenav > .sl-page")?.select("option")
-        ?.mapIndexed { idx, page ->
-            Page(idx, url = page.attr("value"))
-        } ?: emptyList()
-
-    override fun imageUrlParse(response: Response): String {
-        val document = response.asJsoup()
-        return document.select(".mangaread-manga-pic").attr("src")
-    }
+    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
     private fun Elements.imgAttr(): String = when {
         hasAttr("lazy_url") -> attr("abs:lazy_url")
@@ -307,44 +264,6 @@ abstract class NovelCool :
 
     private val SharedPreferences.useAppApi: Boolean
         get() = getBoolean(PREF_API_SEARCH, true)
-
-    private fun jsRedirect(chain: Interceptor.Chain): Response {
-        val request = chain.request()
-        val headers = request.headers.newBuilder()
-            .removeAll("Accept-Encoding")
-            .build()
-        val response = chain.proceed(request.newBuilder().headers(headers).build())
-
-        if (response.header("Content-Type")?.contains("text/html") != true) {
-            return response
-        }
-
-        val responseBody = response.peekBody(Long.MAX_VALUE).string()
-        val document = Jsoup.parse(responseBody)
-        val script = document.selectFirst("script:containsData(window.location.href)")?.html()
-            ?: return response
-
-        val jsRedirect = JS_REDIRECT_REGEX.find(script)?.groupValues?.get(1)
-            ?: return response
-
-        val requestUrl = response.request.url
-
-        val url = requestUrl.resolve(jsRedirect)
-            ?: return response
-
-        response.close()
-
-        val newHeaders = request.headers.newBuilder()
-            .set("Referer", requestUrl.toString())
-            .build()
-
-        return chain.proceed(
-            request.newBuilder()
-                .url(url)
-                .headers(newHeaders)
-                .build(),
-        )
-    }
 
     private fun commonApiRequest(url: String, page: Int, query: String? = null): Request {
         val payload = NovelCoolBrowsePayload(
@@ -379,12 +298,6 @@ abstract class NovelCool :
         private const val SIZE = 20
 
         private val DATE_FORMATTER = SimpleDateFormat("MMM dd, yyyy", Locale.ENGLISH)
-
-        // Matches any http/https URL inside single or double quotes within the all_imgs_url array.
-        // Using the same approach as NineAnime which shares the same image-serving infrastructure.
-        private val imageUrlRegex = Regex("""["'](https?://[^"']+)["']""")
-
-        private val JS_REDIRECT_REGEX = Regex("""window\.location\.href\s*=\s*["']([^"']+)["']""")
 
         private const val PREF_API_SEARCH = "pref_use_search_api"
 
