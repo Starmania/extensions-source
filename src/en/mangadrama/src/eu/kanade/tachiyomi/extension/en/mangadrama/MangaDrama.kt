@@ -1,23 +1,24 @@
 package eu.kanade.tachiyomi.extension.en.mangadrama
 
 import android.util.Base64
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstance
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParseDateTime
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -32,9 +33,7 @@ import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
 @Source
-abstract class MangaDrama : HttpSource() {
-
-    override val supportsLatest = true
+abstract class MangaDrama : KeiSource() {
 
     private val dateFormat: DateTimeFormatter = DateTimeFormatterBuilder()
         .parseCaseInsensitive()
@@ -43,25 +42,22 @@ abstract class MangaDrama : HttpSource() {
 
     private val siteZone = ZoneId.of("Asia/Manila")
 
-    override fun popularMangaRequest(page: Int) = browseRequest(page, sort = "views")
+    override suspend fun getPopularManga(page: Int) = browse(page, sort = "views")
 
-    override fun popularMangaParse(response: Response) = browseParse(response)
+    override suspend fun getLatestUpdates(page: Int) = browse(page, sort = "updated")
 
-    override fun latestUpdatesRequest(page: Int) = browseRequest(page, sort = "updated")
-
-    override fun latestUpdatesParse(response: Response) = browseParse(response)
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         // Title search is a plain WordPress search that returns every match on one page.
         if (query.isNotBlank()) {
             val url = baseUrl.toHttpUrl().newBuilder()
                 .addQueryParameter("s", query)
                 .addQueryParameter("post_type", "manga")
                 .build()
-            return GET(url, headers)
+            val document = client.get(url).asJsoup()
+            return MangasPage(document.select("article").map(::mangaFromElement), false)
         }
 
-        return browseRequest(
+        return browse(
             page,
             sort = filters.firstInstance<SortFilter>().selected,
             type = filters.firstInstance<TypeFilter>().selected,
@@ -69,25 +65,15 @@ abstract class MangaDrama : HttpSource() {
         )
     }
 
-    override fun searchMangaParse(response: Response): MangasPage {
-        if (response.request.url.queryParameter("s") == null) return browseParse(response)
-
-        val document = response.asJsoup()
-        return MangasPage(document.select("article").map(::mangaFromElement), false)
-    }
-
-    private fun browseRequest(page: Int, sort: String, type: String = "", status: String = ""): Request {
+    private suspend fun browse(page: Int, sort: String, type: String = "", status: String = ""): MangasPage {
         val url = "$baseUrl/advanced-filter/".toHttpUrl().newBuilder().apply {
             if (page > 1) addPathSegments("page/$page/")
             addQueryParameter("sort", sort)
             if (type.isNotEmpty()) addQueryParameter("type", type)
             if (status.isNotEmpty()) addQueryParameter("status", status)
         }.build()
-        return GET(url, headers)
-    }
 
-    private fun browseParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+        val document = client.get(url).asJsoup()
         val mangas = document.select("div.manga-item-details").map(::mangaFromElement)
         val hasNextPage = document.selectFirst("ul.uk-pagination li:not(.uk-disabled) a[aria-label=\"Next page\"]") != null
         return MangasPage(mangas, hasNextPage)
@@ -100,29 +86,45 @@ abstract class MangaDrama : HttpSource() {
         thumbnail_url = element.selectFirst("img")?.absUrl("src")
     }
 
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?) = FilterList(
         SortFilter(),
         TypeFilter(),
         StatusFilter(),
     )
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
-        return SManga.create().apply {
-            title = document.selectFirst("h1#manga-title")!!.text()
-            description = document.selectFirst("#manga-description")?.text()
-            genre = document.select("#genre-tags a").joinToString { it.text() }
-            author = document.infoValue("Illustrator")
-            artist = document.infoValue("Designer")
-            status = when (document.selectFirst("#manga-status")?.text()?.lowercase(Locale.ENGLISH)) {
-                "ongoing", "caught up" -> SManga.ONGOING
-                "completed" -> SManga.COMPLETED
-                "hiatus", "source hiatus", "season end" -> SManga.ON_HIATUS
-                "dropped" -> SManga.CANCELLED
-                else -> SManga.UNKNOWN
-            }
-            thumbnail_url = document.selectFirst("meta[property=og:image]")?.attr("content")
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val segments = url.pathSegments
+        if (url.host != baseUrl.toHttpUrl().host || segments.firstOrNull() != "manga" || segments.getOrNull(1).isNullOrEmpty()) return null
+
+        val manga = SManga.create().apply { this.url = "/manga/${segments[1]}/" }
+        return fetchMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false).manga
+    }
+
+    // Details and the full chapter list are on the same page.
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get(getMangaUrl(manga)).asJsoup()
+        return SMangaUpdate(mangaDetails(document), chapterList(document))
+    }
+
+    private fun mangaDetails(document: Document): SManga = SManga.create().apply {
+        title = document.selectFirst("h1#manga-title")!!.text()
+        description = document.selectFirst("#manga-description")?.text()
+        genre = document.select("#genre-tags a").joinToString { it.text() }
+        author = document.infoValue("Illustrator")
+        artist = document.infoValue("Designer")
+        status = when (document.selectFirst("#manga-status")?.text()?.lowercase(Locale.ENGLISH)) {
+            "ongoing", "caught up" -> SManga.ONGOING
+            "completed" -> SManga.COMPLETED
+            "hiatus", "source hiatus", "season end" -> SManga.ON_HIATUS
+            "dropped" -> SManga.CANCELLED
+            else -> SManga.UNKNOWN
         }
+        thumbnail_url = document.selectFirst("meta[property=og:image]")?.attr("content")
     }
 
     // Each row is `Label: <value><br>` inside a single element.
@@ -136,7 +138,7 @@ abstract class MangaDrama : HttpSource() {
         ?.takeIf { it.isNotEmpty() }
 
     // Coin-locked chapters have no page data for anonymous users and are marked with a lock icon.
-    override fun chapterListParse(response: Response): List<SChapter> = response.asJsoup().select("div.chapter-list a[href*=/chapter-]:not(:has([uk-icon*=\"lock\"]))").map { element ->
+    private fun chapterList(document: Document): List<SChapter> = document.select("div.chapter-list a[href*=/chapter-]:not(:has([uk-icon*=\"lock\"]))").map { element ->
         SChapter.create().apply {
             setUrlWithoutDomain(element.absUrl("href"))
             name = element.selectFirst("div.uk-flex-none")!!.text()
@@ -147,8 +149,8 @@ abstract class MangaDrama : HttpSource() {
         }
     }
 
-    override fun pageListParse(response: Response): List<Page> {
-        val html = response.body.string()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val html = client.get(getChapterUrl(chapter)).use { it.body.string() }
 
         val encrypted = ENCRYPTED_CHAPTER_REGEX.find(html)?.groupValues?.get(1)?.parseAs<EncryptedChapter>()
             ?: error("Chapter is not available")
@@ -159,8 +161,6 @@ abstract class MangaDrama : HttpSource() {
             .select("img")
             .mapIndexed { i, img -> Page(i, imageUrl = img.absUrl("src")) }
     }
-
-    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
 
     @Serializable
     private class EncryptedChapter(
