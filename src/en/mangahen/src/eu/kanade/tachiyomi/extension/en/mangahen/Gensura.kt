@@ -19,14 +19,14 @@ import rx.Observable
 @Source
 abstract class Gensura : HttpSource() {
 
-    private val advSearchURL = "$baseUrl/advanced-search"
+    private val advSearchURL = "$baseUrl/advanced-search/"
 
     override val supportsLatest = true
 
-    private var tagsList: List<String> = listOf()
+    private var tagIds: Map<String, String> = emptyMap()
 
     // Popular
-    override fun popularMangaRequest(page: Int): Request = GET("$advSearchURL/?search=1&type=0&sort=1&page=$page", headers)
+    override fun popularMangaRequest(page: Int): Request = GET("$advSearchURL?search=1&type=0&sort=1&page=$page", headers)
 
     override fun popularMangaParse(response: Response): MangasPage {
         val doc = response.asJsoup()
@@ -45,33 +45,27 @@ abstract class Gensura : HttpSource() {
     }
 
     // Latest
-    override fun latestUpdatesRequest(page: Int): Request = GET("$advSearchURL/?search=1&type=0&sort=2&page=$page", headers)
+    override fun latestUpdatesRequest(page: Int): Request = GET("$advSearchURL?search=1&type=0&sort=2&page=$page", headers)
 
     override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
 
     // Search
 
-    private fun tagSearch(tag: String, tagsList: List<String>): String? {
-        val index = (tagsList.indexOf(tag) + 1).toString()
-        return if (index != "-1") index else null
-    }
+    private fun tagIds(): Map<String, String> {
+        if (tagIds.isEmpty()) {
+            val response = client.newCall(GET(advSearchURL, headers)).execute()
 
-    private fun tagsList(): List<String> {
-        if (tagsList.isEmpty()) {
-            val request = GET(advSearchURL, headers)
-
-            val response = client.newCall(request).execute()
-
-            tagsList = response.asJsoup().select("li[onclick=updateTag(this)]").map { it.ownText().lowercase() }
+            tagIds = response.asJsoup().select("li[onclick=updateTag(this)]")
+                .associate { it.ownText().lowercase() to it.attr("data-value") }
         }
-        return tagsList
+        return tagIds
     }
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         val includeTags = mutableListOf<String>()
         val excludeTags = mutableListOf<String>()
 
-        val tagsList = tagsList()
+        val tagIds = tagIds()
         val url = advSearchURL.toHttpUrl().newBuilder().apply {
             filters.forEach {
                 when (it) {
@@ -84,13 +78,9 @@ abstract class Gensura : HttpSource() {
                             it.state.split(",").filter(String::isNotBlank).map { tag ->
                                 val trimmed = tag.trim().lowercase()
                                 if (trimmed.startsWith('-')) {
-                                    tagSearch(trimmed.removePrefix("-"), tagsList)?.let { tagInfo ->
-                                        excludeTags.add(tagInfo)
-                                    }
+                                    tagIds[trimmed.removePrefix("-")]?.let(excludeTags::add)
                                 } else {
-                                    tagSearch(trimmed, tagsList)?.let { tagInfo ->
-                                        includeTags.add(tagInfo)
-                                    }
+                                    tagIds[trimmed]?.let(includeTags::add)
                                 }
                             }
                         }
@@ -103,8 +93,8 @@ abstract class Gensura : HttpSource() {
             addQueryParameter("name", query)
 
             addQueryParameter("search", "1")
-            if (includeTags.isNotEmpty()) addQueryParameter("include_tags", includeTags.joinToString())
-            if (excludeTags.isNotEmpty()) addQueryParameter("exclude_tags", excludeTags.joinToString())
+            if (includeTags.isNotEmpty()) addQueryParameter("include_tags", includeTags.joinToString(","))
+            if (excludeTags.isNotEmpty()) addQueryParameter("exclude_tags", excludeTags.joinToString(","))
             if (page > 1) addQueryParameter("page", page.toString())
         }.build()
 
