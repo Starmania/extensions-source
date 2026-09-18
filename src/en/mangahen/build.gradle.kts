@@ -6,13 +6,17 @@ plugins {
 
 keiyoushi {
     name = "Gensura"
-    versionCode = 4
+    versionCode = 5
     contentWarning = ContentWarning.NSFW
-    libVersion = "1.4"
+    libVersion = "1.6"
 
     source {
         lang = "en"
         baseUrl = "https://gensura.net"
         id = 6602595408477221375L
+    }
+
+    deeplink {
+        path("/manga/..*")
     }
 }
