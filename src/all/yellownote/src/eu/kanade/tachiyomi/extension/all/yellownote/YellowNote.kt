@@ -36,8 +36,11 @@ abstract class YellowNote :
 
     private val preferences: SharedPreferences by getPreferencesLazy()
 
+    // img.xchina.io sits behind a Cloudflare rule that rejects requests lacking a
+    // browser-like Accept header (OkHttp sends none), so covers and pages 403 without it.
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
+        .add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 
     private val intl by lazy {
         Intl(
