@@ -6,10 +6,9 @@ plugins {
 
 keiyoushi {
     name = "Manga Drama"
-    versionCode = 0
+    versionCode = 53
     contentWarning = ContentWarning.NSFW // or MIXED, please confirm
     libVersion = "1.4"
-    theme = "madaralegacy"
 
     source {
         lang = "en"
