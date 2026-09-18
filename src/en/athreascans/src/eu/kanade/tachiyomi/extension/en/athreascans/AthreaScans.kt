@@ -9,7 +9,7 @@ import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.getPreferences
 import okhttp3.OkHttpClient
-import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 
 @Source
 abstract class AthreaScans :
@@ -27,9 +27,12 @@ abstract class AthreaScans :
         preferences,
     )
 
-    override fun chapterListParse(document: Document) = super.chapterListParse(document).filterNot { chapter ->
-        // Additional filter: skip chapters without valid URLs (locked chapters have no href)
-        chapter.url.isBlank() || chapter.url == "#"
+    override fun chapterFromElement(element: Element) = super.chapterFromElement(element).apply {
+        // Locked chapters have no href, only the post id on the modal trigger.
+        // WordPress redirects ?p=<id> to the chapter permalink.
+        if (url.isBlank()) {
+            element.selectFirst("a[data-id]")?.attr("data-id")?.let { url = "/?p=$it" }
+        }
     }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
