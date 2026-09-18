@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.extension.ar.arabshentai
 
+import android.util.Base64
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -10,10 +11,12 @@ import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.asJsoup
+import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
@@ -24,7 +27,7 @@ import java.util.Locale
 
 @Source
 abstract class ArabsHentai : HttpSource() {
-    private val dateFormat = SimpleDateFormat("d MMM، yyy", Locale("ar"))
+    private val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.ENGLISH)
     override val supportsLatest = true
     override val client = network.client.newBuilder()
         .rateLimit(2)
@@ -129,7 +132,7 @@ abstract class ArabsHentai : HttpSource() {
     // ============================== Chapters ==============================
     override fun chapterListParse(response: Response): List<SChapter> {
         val document = response.asJsoup()
-        return document.select("#chapter-list a[href*='/manga/'], .oneshot-reader .images .image-item a[href$='manga-paged=1']")
+        return document.select("#chapter-list li a[href*='/manga/'], .oneshot-reader .images .image-item a[href$='style=paged']")
             .mapNotNull { it.toChapter() }
     }
 
@@ -149,12 +152,22 @@ abstract class ArabsHentai : HttpSource() {
     private fun String?.parseChapterDate(): Long = dateFormat.tryParse(this)
 
     // =============================== Pages ================================
+    // The reader no longer serves <img> tags: page URLs ship base64-encoded in an
+    // inline script and the browser turns them into blob: URLs on demand.
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
-        return document.select(".chapter_image img.wp-manga-chapter-img").mapIndexed { index, item ->
-            Page(index = index, imageUrl = item.imgAttr())
+        val script = document.selectFirst("script:containsData(const images)")?.data()
+            ?: throw Exception("لم يتم العثور على الصور")
+        val images = IMAGES_REGEX.find(script)?.groupValues?.get(1)
+            ?.parseAs<List<PageDto>>()
+            ?: throw Exception("لم يتم العثور على الصور")
+        return images.mapIndexed { index, item ->
+            Page(index = index, imageUrl = String(Base64.decode(item.url, Base64.DEFAULT)))
         }
     }
+
+    @Serializable
+    private class PageDto(val url: String)
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
@@ -193,6 +206,10 @@ abstract class ArabsHentai : HttpSource() {
     }
 
     private fun genresRequest() = GET("$baseUrl/%d8%aa%d8%b5%d9%86%d9%8a%d9%81%d8%a7%d8%aa", headers)
+
+    companion object {
+        private val IMAGES_REGEX = Regex("""const images = (\[.*?]);""")
+    }
     private fun parseGenres(document: Document): List<Pair<String, String>> {
         val items = document.select("#archive-content ul.genre-list li.item-genre .genre-data a")
         return buildList(items.size) {
