@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.extension.es.catmanhwas
 
+import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import kotlinx.serialization.SerialName
@@ -112,3 +113,15 @@ class PaginationDto(
 ) {
     fun hasNextPage() = currentPage < lastPage
 }
+
+@Serializable
+class PageListDto(
+    private val chapter: ChapterImagesDto,
+) {
+    fun toPages() = chapter.images.mapIndexed { index, url -> Page(index, imageUrl = url) }
+}
+
+@Serializable
+class ChapterImagesDto(
+    val images: List<String>,
+)

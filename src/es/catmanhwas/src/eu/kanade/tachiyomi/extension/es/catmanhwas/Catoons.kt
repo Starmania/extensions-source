@@ -148,13 +148,11 @@ abstract class Catoons : HttpSource() {
 
     override fun getChapterUrl(chapter: SChapter) = "$baseUrl/series/${chapter.url}"
 
-    override fun pageListRequest(chapter: SChapter) = GET("$baseUrl/series/${chapter.url}", headers)
+    override fun pageListRequest(chapter: SChapter) = GET("$baseUrl/series/${chapter.url}/__data.json?x-sveltekit-invalidated=001", headers)
 
     override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
-        return document.select("div.items-center > div.w-full > img").mapIndexed { index, element ->
-            Page(index, imageUrl = element.attr("abs:src"))
-        }
+        val dataNode = response.parseAs<SvelteDataDto>().getDataNode()
+        return decodeSvelte(dataNode).parseAs<PageListDto>().toPages()
     }
 
     override fun getFilterList() = getFilters()
