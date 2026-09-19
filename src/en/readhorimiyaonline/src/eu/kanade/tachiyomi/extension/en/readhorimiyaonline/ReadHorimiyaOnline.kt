@@ -54,9 +54,9 @@ abstract class ReadHorimiyaOnline : HttpSource() {
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val doc = response.asJsoup()
-        return doc.select("#Chapters_List ul li ul li a").map { element ->
+        return doc.select("#chapters-list-holder a.chapter-list-item").map { element ->
             SChapter.create().apply {
-                name = element.text()
+                name = element.selectFirst(".chapter-name")!!.text()
                 setUrlWithoutDomain(element.absUrl("href"))
             }
         }
@@ -67,7 +67,7 @@ abstract class ReadHorimiyaOnline : HttpSource() {
 
     override fun pageListParse(response: Response): List<Page> {
         val doc = response.asJsoup()
-        return doc.select("div.separator a > img").mapIndexed { index, img ->
+        return doc.select(".images-container img").mapIndexed { index, img ->
             val imageUrl = img.attr("data-lazy-src").takeIf { it.isNotEmpty() }
                 ?: img.absUrl("src")
             Page(index, imageUrl = imageUrl)
@@ -81,12 +81,12 @@ abstract class ReadHorimiyaOnline : HttpSource() {
     private fun parseManga(doc: Document): SManga = SManga.create().apply {
         title = "Horimiya"
         url = "/"
-        thumbnail_url = doc.selectFirst("ul.wp-block-gallery li.blocks-gallery-item img")
+        thumbnail_url = doc.selectFirst("img.manga-thumb")
             ?.let { img ->
                 img.attr("data-lazy-src").takeIf { it.isNotEmpty() }
                     ?: img.absUrl("src")
             }
-        description = doc.selectFirst("p")?.text()
+        description = doc.selectFirst("span.desc")?.text()
         status = SManga.UNKNOWN
         initialized = true
     }
