@@ -7,18 +7,22 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.applicationContext
 import keiyoushi.utils.asJsoup
+import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -26,10 +30,9 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.collections.component1
@@ -39,59 +42,61 @@ import kotlin.collections.map
 import kotlin.time.Duration.Companion.seconds
 
 @Source
-abstract class Catoons : HttpSource() {
+abstract class Catoons : KeiSource() {
 
-    override val supportsLatest = true
+    override fun OkHttpClient.Builder.configureClient() = rateLimit(3, 1.seconds)
 
-    override val client: OkHttpClient = network.client.newBuilder()
-        .rateLimit(3, 1.seconds)
-        .build()
+    override suspend fun getPopularManga(page: Int) = browse(page, sort = "popular")
 
-    override fun popularMangaRequest(page: Int) = searchMangaRequest(page, "", FilterList(OrderFilter(listOf("" to "popular"))))
+    override suspend fun getLatestUpdates(page: Int) = browse(page, sort = "recent")
 
-    override fun popularMangaParse(response: Response) = searchMangaParse(response)
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList) = browse(
+        page,
+        query,
+        genre = filters.firstInstanceOrNull<GenreFilter>()?.selected,
+        sort = filters.firstInstanceOrNull<OrderFilter>()?.selected,
+    )
 
-    override fun latestUpdatesRequest(page: Int) = searchMangaRequest(page, "", FilterList(OrderFilter(listOf("" to "recent"))))
-
-    override fun latestUpdatesParse(response: Response) = searchMangaParse(response)
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = "$baseUrl/series/__data.json".toHttpUrl().newBuilder()
-
-        url.addQueryParameter("page", page.toString())
-
-        filters.forEach { filter ->
-            when (filter) {
-                is GenreFilter -> url.addQueryParameter("genre", filter.selected)
-                is OrderFilter -> url.addQueryParameter("sort", filter.selected)
-                else -> {}
+    private suspend fun browse(page: Int, query: String = "", genre: String? = null, sort: String? = null): MangasPage {
+        val url = "$baseUrl/series/__data.json".toHttpUrl().newBuilder().apply {
+            addQueryParameter("page", page.toString())
+            genre?.let { addQueryParameter("genre", it) }
+            sort?.let { addQueryParameter("sort", it) }
+            if (query.isNotBlank()) {
+                addQueryParameter("search", query)
             }
-        }
+            addQueryParameter("x-sveltekit-invalidated", "001")
+        }.build()
 
-        if (query.isNotBlank()) {
-            url.addQueryParameter("search", query)
-        }
-
-        url.addQueryParameter("x-sveltekit-invalidated", "001")
-
-        return GET(url.build(), headers)
-    }
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        val dataNode = response.parseAs<SvelteDataDto>().getDataNode()
+        val dataNode = client.get(url).parseAs<SvelteDataDto>().getDataNode()
         val data = decodeSvelte(dataNode).parseAs<BrowseDto>()
         return MangasPage(data.series.map { it.toSManga() }, data.hasNextPage())
     }
 
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host || url.pathSegments.firstOrNull() != "series") return null
+        val slug = url.pathSegments.getOrNull(1)?.takeIf { it.isNotEmpty() } ?: return null
+
+        return fetchDetails(slug).apply { this.url = slug }
+    }
+
     override fun getMangaUrl(manga: SManga) = "$baseUrl/series/${manga.url}"
 
-    override fun mangaDetailsRequest(manga: SManga) = GET("$baseUrl/series/${manga.url}", headers)
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate = coroutineScope {
+        val details = async { if (fetchDetails) fetchDetails(manga.url) else manga }
+        val chapterList = async { if (fetchChapters) fetchChapters(manga.url) else chapters }
+        SMangaUpdate(details.await(), chapterList.await())
+    }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val mangaSlug = response.request.url.pathSegments.last()
-        getRemoteChunks("$baseUrl/series/$mangaSlug")
-        val details = getDetailsFromApi(mangaSlug)
-        val document = response.asJsoup()
+    private suspend fun fetchDetails(slug: String): SManga {
+        val document = client.get("$baseUrl/series/$slug").asJsoup()
+        getRemoteChunks("$baseUrl/series/$slug")
+        val details = getDetailsFromApi(slug)
         return SManga.create().apply {
             title = document.selectFirst("h1.font-bold")!!.text()
             thumbnail_url = document.selectFirst("div.mx-auto > div > img.object-cover")?.attr("abs:src")
@@ -101,26 +106,31 @@ abstract class Catoons : HttpSource() {
         }
     }
 
-    private fun getDetailsFromApi(slug: String): DetailsDto {
+    private suspend fun getDetailsFromApi(slug: String): DetailsDto {
         val url = "$baseUrl/_app/remote/$detailsChunk/getSerieDetails".toHttpUrl().newBuilder()
             .addQueryParameter("payload", """["$slug"]""".toBase64())
             .build()
 
-        val result = client.newCall(GET(url, headers)).execute().parseAs<SvelteResultDto>().getResult()
+        val result = client.get(url).parseAs<SvelteResultDto>().getResult()
         return decodeSvelte(result.jsonArray).parseAs<DetailsDto>()
     }
 
-    override fun chapterListRequest(manga: SManga): Request {
-        getRemoteChunks("$baseUrl/series/${manga.url}")
-        return paginatedChapterListRequest(manga.url, 1)
-    }
+    private suspend fun fetchChapters(slug: String): List<SChapter> {
+        getRemoteChunks("$baseUrl/series/$slug")
 
-    private fun paginatedChapterListRequest(slug: String, page: Int): Request {
-        val url = "$baseUrl/_app/remote/$chaptersChunk/getChapters".toHttpUrl().newBuilder()
-            .addQueryParameter("payload", getChapterPayload(slug, page))
-            .fragment(slug)
+        val chapters = mutableListOf<SChapter>()
+        var page = 1
+        do {
+            val url = "$baseUrl/_app/remote/$chaptersChunk/getChapters".toHttpUrl().newBuilder()
+                .addQueryParameter("payload", getChapterPayload(slug, page))
+                .build()
+            val result = client.get(url).parseAs<SvelteResultDto>().getResult()
+            val data = decodeSvelte(result.jsonArray).parseAs<ChapterDataDto>()
+            chapters += data.data.map { it.toSChapter(slug) }
+            page = data.pagination.currentPage + 1
+        } while (data.pagination.hasNextPage())
 
-        return GET(url.build(), headers)
+        return chapters
     }
 
     private fun getChapterPayload(slug: String, page: Int): String {
@@ -128,34 +138,15 @@ abstract class Catoons : HttpSource() {
         return payload.toBase64()
     }
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val mangaSlug = response.request.url.fragment!!
-        val result = response.parseAs<SvelteResultDto>().getResult()
-        var chapterListData = decodeSvelte(result.jsonArray).parseAs<ChapterDataDto>()
-
-        val chapterList = chapterListData.data.map { it.toSChapter(mangaSlug) }.toMutableList()
-
-        while (chapterListData.pagination.hasNextPage()) {
-            val nextPageRequest = paginatedChapterListRequest(mangaSlug, chapterListData.pagination.currentPage + 1)
-            val nextPageResponse = client.newCall(nextPageRequest).execute()
-            val nextPageResult = nextPageResponse.parseAs<SvelteResultDto>().getResult()
-            chapterListData = decodeSvelte(nextPageResult.jsonArray).parseAs<ChapterDataDto>()
-            chapterList.addAll(chapterListData.data.map { it.toSChapter(mangaSlug) })
-        }
-
-        return chapterList
-    }
-
     override fun getChapterUrl(chapter: SChapter) = "$baseUrl/series/${chapter.url}"
 
-    override fun pageListRequest(chapter: SChapter) = GET("$baseUrl/series/${chapter.url}/__data.json?x-sveltekit-invalidated=001", headers)
-
-    override fun pageListParse(response: Response): List<Page> {
-        val dataNode = response.parseAs<SvelteDataDto>().getDataNode()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val url = "$baseUrl/series/${chapter.url}/__data.json?x-sveltekit-invalidated=001"
+        val dataNode = client.get(url).parseAs<SvelteDataDto>().getDataNode()
         return decodeSvelte(dataNode).parseAs<PageListDto>().toPages()
     }
 
-    override fun getFilterList() = getFilters()
+    override fun getFilterList(data: JsonElement?) = getFilters()
 
     private fun String.toBase64() = Base64.encodeToString(this.toByteArray(), Base64.DEFAULT)
 
@@ -224,8 +215,6 @@ abstract class Catoons : HttpSource() {
             webView?.destroy()
         }
     }
-
-    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
 
     fun decodeSvelte(data: JsonArray): JsonElement = resolve(data, data[0])
 
