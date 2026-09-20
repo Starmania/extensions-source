@@ -1,32 +1,33 @@
 package eu.kanade.tachiyomi.extension.es.yupmanga
 
 import app.cash.quickjs.QuickJs
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.parseAs
+import okhttp3.CacheControl
 import okhttp3.FormBody
+import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
-import okhttp3.Request
-import okhttp3.Response
+import okhttp3.OkHttpClient
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 @Source
-abstract class Yupmanga : HttpSource() {
-
-    override val supportsLatest = true
+abstract class Yupmanga : KeiSource() {
 
     // Cached CSRF token populated by the token interceptor during normal browsing flow.
     private var csrfToken: String = ""
@@ -49,41 +50,29 @@ abstract class Yupmanga : HttpSource() {
         response
     }
 
-    override val client = network.client.newBuilder()
-        .addInterceptor(tokenInterceptor)
+    override fun OkHttpClient.Builder.configureClient() = addInterceptor(tokenInterceptor)
         .rateLimit(1)
-        .build()
 
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
-
-    private val apiHeaders by lazy {
-        headersBuilder()
+    private val apiHeaders: Headers by lazy {
+        headers.newBuilder()
             .add("X-Requested-With", "XMLHttpRequest")
             .build()
     }
 
-    override fun popularMangaRequest(page: Int) = GET("$baseUrl/top", headers)
+    override suspend fun getPopularManga(page: Int): MangasPage = parseSeriesList(client.get("$baseUrl/top").asJsoup())
 
-    override fun popularMangaParse(response: Response) = parseSeriesList(response.asJsoup())
+    override suspend fun getLatestUpdates(page: Int): MangasPage = parseSeriesList(client.get("$baseUrl/?page=$page").asJsoup())
 
-    override fun latestUpdatesRequest(page: Int) = GET("$baseUrl/?page=$page", headers)
-
-    override fun latestUpdatesParse(response: Response) = parseSeriesList(response.asJsoup())
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         if (query.length < 3) {
             throw Exception("El término de búsqueda debe tener al menos 3 caracteres.")
         }
         val url = "$baseUrl/search.php".toHttpUrl().newBuilder()
             .addQueryParameter("q", query)
             .addQueryParameter("page", page.toString())
+            .build()
 
-        return GET(url.build(), headers)
-    }
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+        val document = client.get(url).asJsoup()
         document.selectFirst("main > div.container > div[class^=bg-red]:has(p)")?.let {
             throw Exception("Límite de solicitudes alcanzado. Intente de nuevo en unos minutos.")
         }
@@ -108,10 +97,31 @@ abstract class Yupmanga : HttpSource() {
         return MangasPage(mangas, hasNextPage)
     }
 
-    override fun mangaDetailsRequest(manga: SManga) = GET("$baseUrl/series.php?id=${manga.url}", headers)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host) return null
+        val id = url.queryParameter("id") ?: return null
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
+        return fetchMangaDetails(id).apply { this.url = id }
+    }
+
+    override fun getMangaUrl(manga: SManga) = "$baseUrl/series.php?id=${manga.url}"
+
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        // Sequential on purpose: fetching both concurrently leaves the CSRF token captured from the
+        // series page unusable, and get_anchor.php then answers 403 when opening a chapter.
+        val details = if (fetchDetails) fetchMangaDetails(manga.url) else manga
+        val chapterList = if (fetchChapters) fetchChapterList(manga.url) else chapters
+
+        return SMangaUpdate(details, chapterList)
+    }
+
+    private suspend fun fetchMangaDetails(mangaId: String): SManga {
+        val document = client.get("$baseUrl/series.php?id=$mangaId").asJsoup()
         return SManga.create().apply {
             val container = document.selectFirst("main > div.container")
                 ?: throw Exception("No se pudo encontrar la información del manga")
@@ -136,32 +146,18 @@ abstract class Yupmanga : HttpSource() {
         else -> SManga.UNKNOWN
     }
 
-    private fun paginatedChapterListRequest(mangaId: String, page: Int): Request {
-        val url = "$baseUrl/ajax/load_chapters.php".toHttpUrl().newBuilder()
-            .addQueryParameter("series_id", mangaId)
-            .addQueryParameter("page", page.toString())
-            .addQueryParameter("order", "newest_first")
-
-        return GET(url.build(), apiHeaders)
-    }
-
-    override fun chapterListRequest(manga: SManga): Request = paginatedChapterListRequest(manga.url, 1)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
+    private suspend fun fetchChapterList(mangaId: String): List<SChapter> {
         val allChapters = mutableListOf<SChapter>()
-        val mangaId = response.request.url.queryParameter("series_id")!!
-
-        lateinit var chapterListDto: ChapterListDto
 
         var page = 1
         do {
-            chapterListDto = if (page == 1) {
-                response.parseAs()
-            } else {
-                client.newCall(
-                    paginatedChapterListRequest(mangaId, page),
-                ).execute().parseAs()
-            }
+            val url = "$baseUrl/ajax/load_chapters.php".toHttpUrl().newBuilder()
+                .addQueryParameter("series_id", mangaId)
+                .addQueryParameter("page", page.toString())
+                .addQueryParameter("order", "newest_first")
+                .build()
+
+            val chapterListDto = client.get(url, apiHeaders).parseAs<ChapterListDto>()
 
             val doc = Jsoup.parseBodyFragment(chapterListDto.html, baseUrl)
             allChapters.addAll(parseChapterList(doc, mangaId))
@@ -195,7 +191,7 @@ abstract class Yupmanga : HttpSource() {
         return "$baseUrl/series.php?id=$mangaId"
     }
 
-    override fun pageListRequest(chapter: SChapter): Request {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val chapterId: String
         val mangaId: String
 
@@ -212,7 +208,7 @@ abstract class Yupmanga : HttpSource() {
         // If opened directly from the library/cached details and csrfToken is empty,
         // we must fetch the series page to trigger the interceptor and populate the values.
         if (csrfToken.isEmpty() && mangaId.isNotEmpty()) {
-            client.newCall(GET("$baseUrl/series.php?id=$mangaId", headers)).execute().close()
+            client.get("$baseUrl/series.php?id=$mangaId", cacheControl = CacheControl.FORCE_NETWORK).close()
         }
 
         val requestHeaders = apiHeaders.newBuilder().apply {
@@ -222,8 +218,8 @@ abstract class Yupmanga : HttpSource() {
         }.build()
 
         val anchorUrl = "$baseUrl/ajax/get_anchor.php?s=$mangaId"
-        val anchorResponse = client.newCall(GET(anchorUrl, requestHeaders)).execute()
-        val anchorValue = anchorResponse.parseAs<AnchorDto>().v ?: throw Exception("Failed to get anchor")
+        val anchorValue = client.get(anchorUrl, requestHeaders, CacheControl.FORCE_NETWORK).parseAs<AnchorDto>().v
+            ?: throw Exception("Failed to get anchor")
 
         val challengeBody = FormBody.Builder()
             .add("chapter", chapterId)
@@ -233,7 +229,7 @@ abstract class Yupmanga : HttpSource() {
             .build()
         val challengeUrl = "$baseUrl/ajax/get_challenge.php"
 
-        val challenge = client.newCall(POST(challengeUrl, apiHeaders, challengeBody)).execute().parseAs<ChallengeDto>()
+        val challenge = client.post(challengeUrl, apiHeaders, challengeBody).parseAs<ChallengeDto>()
         if (!challenge.success || challenge.challengeJs == null || challenge.challengeId == null) {
             throw Exception("Error fetching challenge")
         }
@@ -285,9 +281,8 @@ abstract class Yupmanga : HttpSource() {
             .add("challenge_id", challenge.challengeId)
             .add("answer", answer)
             .build()
-        val request = POST("$baseUrl/ajax/get_reader_token.php", apiHeaders, formBody)
 
-        val tokenDto = client.newCall(request).execute().parseAs<TokenDto>()
+        val tokenDto = client.post("$baseUrl/ajax/get_reader_token.php", apiHeaders, formBody).parseAs<TokenDto>()
         if (!tokenDto.success || tokenDto.token.isNullOrEmpty()) {
             throw Exception("Información desactualizada. Refresque la lista de capítulos.")
         }
@@ -299,21 +294,15 @@ abstract class Yupmanga : HttpSource() {
             .addQueryParameter("page", "1")
             .build()
 
-        return GET(readerUrl, headers)
+        return parsePageList(client.get(readerUrl).asJsoup(), realChapterId, tokenDto.token)
     }
 
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
-        val requestUrl = response.request.url
-
-        val chapterId = requestUrl.queryParameter("chapter")
-        val token = requestUrl.queryParameter("token")
-
+    private fun parsePageList(document: Document, chapterId: String, token: String): List<Page> {
         // In 'Manga' mode, only the first image is present in the DOM, so we must rely on the inline config script.
         // This will successfully generate the pages accurately for both Webtoon & Manga modes.
         val scriptData = document.selectFirst("script:containsData(totalPages:)")?.data()
 
-        if (scriptData != null && chapterId != null && token != null) {
+        if (scriptData != null) {
             val totalPagesStr = scriptData.substringAfter("totalPages:").substringBefore(",").trim()
             val totalPages = totalPagesStr.toIntOrNull()
 
@@ -330,8 +319,6 @@ abstract class Yupmanga : HttpSource() {
             Page(index, imageUrl = img.attr("abs:src"))
         }
     }
-
-    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
 
     private fun Regex.decodeChars(html: String): String = find(html)?.groupValues?.get(1)?.split(",")?.mapNotNull {
         val clean = it.trim()
