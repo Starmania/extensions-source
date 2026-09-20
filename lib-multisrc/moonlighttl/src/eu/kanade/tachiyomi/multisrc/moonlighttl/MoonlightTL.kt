@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.multisrc.moonlighttl
 
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -10,13 +9,10 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.lib.i18n.Intl
-import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
-import okhttp3.FormBody
 import okhttp3.Request
 import okhttp3.Response
-import org.jsoup.nodes.Element
 import rx.Observable
 import kotlin.math.min
 
@@ -147,28 +143,16 @@ abstract class MoonlightTL : HttpSource() {
         return series.chapters.map { it.toSChapter(seriesPath, series.slug, intl) }
     }
 
-    override fun pageListParse(response: Response): List<Page> {
-        var doc = response.asJsoup()
-        val form = doc.selectFirst("form[method=post]")
-        if (form != null) {
-            val url = form.attr("action")
-            val headers = headersBuilder().set("Referer", doc.location()).build()
-            val body = FormBody.Builder()
-            form.select("input").forEach {
-                body.add(it.attr("name"), it.attr("value"))
-            }
-            doc = client.newCall(POST(url, headers, body.build())).execute().asJsoup()
-        }
-        return doc.select("main.contenedor.read img, main > img").mapIndexed { i, element ->
-            Page(i, imageUrl = element.imgAttr())
-        }
+    override fun pageListRequest(chapter: SChapter): Request {
+        val (seriesSlug, chapterSlug) = chapter.url.removePrefix("$seriesPath/").split('/')
+        return GET("$baseUrl/api/showProject/$seriesSlug/$chapterSlug", headers)
     }
 
-    private fun Element.imgAttr(): String = when {
-        hasAttr("data-lazy-src") -> attr("abs:data-lazy-src")
-        hasAttr("data-src") -> attr("abs:data-src")
-        hasAttr("data-cfsrc") -> attr("abs:data-cfsrc")
-        else -> attr("abs:src")
+    override fun pageListParse(response: Response): List<Page> {
+        val chapter = response.parseAs<ResponseDto<ChapterPagesDto>>().response
+        return chapter.pages.urlImg.parseAs<List<String>>().mapIndexed { i, url ->
+            Page(i, imageUrl = url)
+        }
     }
 
     override fun searchMangaParse(response: Response): MangasPage = throw UnsupportedOperationException()

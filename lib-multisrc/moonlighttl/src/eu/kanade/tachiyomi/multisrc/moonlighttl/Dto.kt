@@ -15,6 +15,17 @@ class ResponseDto<T>(
 )
 
 @Serializable
+class ChapterPagesDto(
+    val pages: PagesDto,
+)
+
+// `urlImg` is itself a JSON-encoded string: an array of image URLs
+@Serializable
+class PagesDto(
+    val urlImg: String,
+)
+
+@Serializable
 class TopSeriesDto(
     @SerialName("mensual") val topMonthly: List<List<PayloadSeriesDto>>,
     @SerialName("semanal") val topWeekly: List<List<PayloadSeriesDto>>,
