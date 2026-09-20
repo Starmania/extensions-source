@@ -1,40 +1,98 @@
 package eu.kanade.tachiyomi.extension.es.lectormangalat
 
-import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.multisrc.madara.Madara
-import eu.kanade.tachiyomi.source.ConfigurableSource
+import eu.kanade.tachiyomi.source.model.FilterList
+import eu.kanade.tachiyomi.source.model.MangasPage
+import eu.kanade.tachiyomi.source.model.Page
+import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
-import keiyoushi.lib.randomua.addRandomUAPreference
-import keiyoushi.lib.randomua.setRandomUserAgent
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.firstInstanceOrNull
+import keiyoushi.utils.parseAs
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import java.text.SimpleDateFormat
-import java.util.Locale
-import kotlin.time.Duration.Companion.seconds
 
 @Source
-abstract class LectorMangaLat :
-    Madara(),
-    ConfigurableSource {
-    override val dateFormat = SimpleDateFormat("MMMM dd, yyyy", Locale("es"))
+abstract class LectorMangaLat : KeiSource() {
 
-    override val client: OkHttpClient = super.client.newBuilder()
-        .rateLimit(2, 1.seconds)
-        .build()
+    // The site renders from this backend; it is the only place with structured data.
+    private val apiUrl = "https://api.zerocomics.net/api"
 
-    override fun headersBuilder() = super.headersBuilder()
-        .setRandomUserAgent()
+    override fun OkHttpClient.Builder.configureClient() = apply {
+        rateLimit(2)
+    }
 
-    override fun getMangaUrl(manga: SManga) = "$baseUrl${manga.url}"
+    override suspend fun getPopularManga(page: Int): MangasPage = getSeriesPage(page, sort = "rating")
 
-    override val mangaSubString = "biblioteca"
+    override suspend fun getLatestUpdates(page: Int): MangasPage = getSeriesPage(page)
 
-    override val useNewChapterEndpoint = true
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = getSeriesPage(
+        page,
+        query = query,
+        type = filters.firstInstanceOrNull<TypeFilter>()?.value.orEmpty(),
+        status = filters.firstInstanceOrNull<StatusFilter>()?.value.orEmpty(),
+        genre = filters.firstInstanceOrNull<GenreFilter>()?.value.orEmpty(),
+    )
 
-    override val pageListParseSelector = "div.reading-content div.page-break > img"
+    private suspend fun getSeriesPage(
+        page: Int,
+        sort: String = "",
+        query: String = "",
+        type: String = "",
+        status: String = "",
+        genre: String = "",
+    ): MangasPage {
+        val url = "$apiUrl/series".toHttpUrl().newBuilder()
+            .addQueryParameter("page", page.toString())
+            .apply {
+                if (sort.isNotEmpty()) addQueryParameter("sort", sort)
+                if (query.isNotBlank()) addQueryParameter("q", query.trim())
+                if (type.isNotEmpty()) addQueryParameter("tipo", type)
+                if (status.isNotEmpty()) addQueryParameter("estado", status)
+                if (genre.isNotEmpty()) addQueryParameter("generos", genre)
+            }
+            .build()
 
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        screen.addRandomUAPreference()
+        val result = client.get(url).parseAs<SeriesPageDto>()
+        return MangasPage(result.data.map { it.toSManga() }, result.hasNextPage)
+    }
+
+    override fun getFilterList(data: JsonElement?) = FilterList(TypeFilter(), StatusFilter(), GenreFilter())
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host || url.pathSegments.firstOrNull() != "comics") {
+            return null
+        }
+        val slug = url.pathSegments.getOrNull(1)?.takeIf { it.isNotBlank() && it != "genre" } ?: return null
+
+        return getSeries(slug).toSManga()
+    }
+
+    // Details and chapters share one response. The slug is read from the last segment so
+    // entries saved by the old Madara version ("/biblioteca/<slug>/") still resolve.
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val series = getSeries(manga.url.trim('/').substringAfterLast('/'))
+        return SMangaUpdate(series.toSManga(), series.toSChapters())
+    }
+
+    private suspend fun getSeries(slug: String) = client.get("$apiUrl/series/$slug").parseAs<DataDto<SeriesDetailsDto>>().data
+
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val segments = chapter.url.trim('/').split('/')
+        val slug = segments[1]
+        val number = segments[2].removePrefix("capitulo-")
+
+        return client.get("$apiUrl/series/$slug/capitulo/$number").parseAs<DataDto<ChapterPagesDto>>().data
+            .paginas.mapIndexed { index, url -> Page(index, imageUrl = url) }
     }
 }
