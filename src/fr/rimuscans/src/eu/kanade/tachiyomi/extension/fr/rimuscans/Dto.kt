@@ -5,13 +5,7 @@ import eu.kanade.tachiyomi.source.model.SManga
 import keiyoushi.utils.tryParse
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.TimeZone
-
-private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
-    timeZone = TimeZone.getTimeZone("UTC")
-}
+import kotlin.time.Instant
 
 // ----- /api/series (listing) -----
 
@@ -117,7 +111,7 @@ class NextChapterDto(
         }
         chapter_number = number.toFloat()
         scanlator = "Rimu Scans"
-        date_upload = dateFormat.tryParse(releaseDate)
+        date_upload = Instant.tryParse(releaseDate)
     }
 }
 
