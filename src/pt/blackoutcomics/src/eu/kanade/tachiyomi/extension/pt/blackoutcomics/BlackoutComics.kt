@@ -1,40 +1,39 @@
 package eu.kanade.tachiyomi.extension.pt.blackoutcomics
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.tryParse
+import keiyoushi.utils.tryParseDate
+import kotlinx.serialization.json.JsonElement
 import okhttp3.Cookie
+import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
-import java.text.SimpleDateFormat
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 @Source
-abstract class BlackoutComics : HttpSource() {
+abstract class BlackoutComics : KeiSource() {
 
-    override val supportsLatest = true
+    private val baseHttpUrl by lazy { baseUrl.toHttpUrl() }
 
-    private val baseHttpUrl = baseUrl.toHttpUrl()
+    override fun OkHttpClient.Builder.configureClient() = addInterceptor(::ageGateInterceptor)
 
-    override val client: OkHttpClient = network.client.newBuilder()
-        .addInterceptor(::ageGateInterceptor)
-        .build()
-
-    override fun headersBuilder() = super.headersBuilder()
-        .add("DNT", "1")
+    override fun Headers.Builder.configureHeaders() = add("DNT", "1")
         .add("Sec-GPC", "1")
         .add("Upgrade-Insecure-Requests", "1")
         .add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
@@ -44,25 +43,20 @@ abstract class BlackoutComics : HttpSource() {
         .add("Sec-Fetch-Site", "same-origin")
 
     // ============================== Popular ===============================
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/ranking", headers)
-
-    override fun popularMangaParse(response: Response): MangasPage {
-        val doc = response.asJsoup()
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val doc = client.get("$baseUrl/ranking").asJsoup()
         return MangasPage(doc.parseCards(".ranking-grid a.webtoon-card"), false)
     }
 
     // =============================== Latest ===============================
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/atualizados-recente?page=$page", headers)
-
-    override fun latestUpdatesParse(response: Response): MangasPage {
-        val doc = response.asJsoup()
-        val mangas = doc.parseCards(".webtoon-grid a.webtoon-card")
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        val doc = client.get("$baseUrl/atualizados-recente?page=$page").asJsoup()
         val hasNext = doc.select(".pagerx__link[rel=next]").isNotEmpty()
-        return MangasPage(mangas, hasNext)
+        return MangasPage(doc.parseCards(".webtoon-grid a.webtoon-card"), hasNext)
     }
 
     // =============================== Search ===============================
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val url = "$baseUrl/comics".toHttpUrl().newBuilder()
         val status = filters.firstInstanceOrNull<StatusFilter>()?.toUriPart()
         val genre = filters.firstInstanceOrNull<GenreFilter>()?.toUriPart()
@@ -71,15 +65,23 @@ abstract class BlackoutComics : HttpSource() {
         if (!status.isNullOrEmpty()) url.addQueryParameter("status", status)
         if (!genre.isNullOrEmpty()) url.addQueryParameter("gen", genre)
 
-        return GET(url.build(), headers)
+        val doc = client.get(url.build()).asJsoup()
+        return MangasPage(doc.parseCards(".webtoon-grid a.webtoon-card"), false)
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = MangasPage(response.asJsoup().parseCards(".webtoon-grid a.webtoon-card"), false)
+    // The site has no URL search; without this a pasted link would throw instead of finding nothing.
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? = null
 
-    // =========================== Manga Details ============================
-    override fun mangaDetailsParse(response: Response): SManga {
-        val doc = response.asJsoup()
-        return SManga.create().apply {
+    // ====================== Manga Details & Chapters ======================
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val doc = client.get(getMangaUrl(manga)).asJsoup()
+
+        val details = SManga.create().apply {
             title = doc.select(".project-title").text()
             thumbnail_url = doc.select(".project-cover").attr("abs:src")
             author = doc.select(".quick-info-item:has(.fa-pen-nib) strong").text()
@@ -94,14 +96,8 @@ abstract class BlackoutComics : HttpSource() {
                 else -> SManga.UNKNOWN
             }
         }
-    }
 
-    // ============================== Chapters ==============================
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val doc = response.asJsoup()
-        val mangaUrl = response.request.url.encodedPath
-
-        return doc.select("#tab-capitulos-list .normal_ep").map { el ->
+        val chapterList = doc.select("#tab-capitulos-list .normal_ep").map { el ->
             SChapter.create().apply {
                 val linkElement = el.selectFirst("a[href]")
                 val num = el.select(".num").text()
@@ -109,7 +105,7 @@ abstract class BlackoutComics : HttpSource() {
                 if (linkElement != null) {
                     setUrlWithoutDomain(linkElement.attr("abs:href"))
                 } else {
-                    url = "$mangaUrl/ler/capitulo-$num"
+                    url = "${manga.url}/ler/capitulo-$num"
                 }
 
                 var chapterName = "Capítulo $num"
@@ -119,13 +115,16 @@ abstract class BlackoutComics : HttpSource() {
                 }
                 name = chapterName
 
-                date_upload = dateFormat.tryParse(el.select(".cell-num .text-muted").text())
+                date_upload = dateFormat.tryParseDate(el.select(".cell-num .text-muted").text())
             }
         }
+
+        return SMangaUpdate(details, chapterList)
     }
 
     // =============================== Pages ================================
-    override fun pageListParse(response: Response): List<Page> {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val response = client.get(getChapterUrl(chapter))
         val doc = response.asJsoup()
 
         for (script in doc.select("script:not([src])")) {
@@ -148,6 +147,7 @@ abstract class BlackoutComics : HttpSource() {
 
     override fun imageRequest(page: Page): Request = super.imageRequest(page).newBuilder()
         .removeHeader("Referer")
+        .removeHeader("Origin")
         .removeHeader("Upgrade-Insecure-Requests")
         .removeHeader("Sec-Fetch-Dest")
         .removeHeader("Sec-Fetch-Mode")
@@ -158,10 +158,8 @@ abstract class BlackoutComics : HttpSource() {
         .header("Sec-Fetch-Site", "same-origin")
         .build()
 
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
     // ============================== Filters ===============================
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?) = FilterList(
         StatusFilter(),
         GenreFilter(),
     )
@@ -203,7 +201,7 @@ abstract class BlackoutComics : HttpSource() {
     }
 
     companion object {
-        private val dateFormat = SimpleDateFormat("dd.MM.yy", Locale.ROOT)
+        private val dateFormat = DateTimeFormatter.ofPattern("dd.MM.yy", Locale.ROOT)
 
         private val PAGE_LIST_REGEX = Regex("""S\s*=\s*(\[[\s\S]*?])""")
     }
