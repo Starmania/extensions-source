@@ -41,13 +41,13 @@ abstract class JeazScans : HttpSource() {
 
     override fun popularMangaParse(response: Response): MangasPage {
         val document = response.asJsoup()
-        val mangas = document.select("section:has(h3:matchesOwn((?i)Top Rankings)) a[href*='manga.php?id=']").map { element ->
+        val mangas = document.select("section.popular-section a.popular-card").map { element ->
             SManga.create().apply {
                 setUrlWithoutDomain(element.attr("abs:href"))
-                title = element.selectFirst("h4, h5")!!.text()
+                title = element.selectFirst("strong")!!.text()
                 thumbnail_url = element.selectFirst("img")?.attr("abs:src")
             }
-        }
+        }.distinctBy { it.url } // swiper loop renders the first slides twice
         return MangasPage(mangas, false)
     }
 
@@ -55,11 +55,12 @@ abstract class JeazScans : HttpSource() {
 
     override fun latestUpdatesParse(response: Response): MangasPage {
         val document = response.asJsoup()
-        val mangas = document.select("section:has(h3:contains(Lanzamientos)) .manga-card")
+        val mangas = document.select("#manga-grid .manga-card")
             .map { element ->
                 SManga.create().apply {
-                    setUrlWithoutDomain(element.selectFirst("a[href*='manga.php?id=']")!!.attr("abs:href"))
-                    title = element.selectFirst("figcaption")!!.text()
+                    val link = element.selectFirst("a.release-title")!!
+                    setUrlWithoutDomain(link.attr("abs:href"))
+                    title = link.text()
                     thumbnail_url = element.selectFirst("img")?.attr("abs:src")
                 }
             }
@@ -158,7 +159,7 @@ abstract class JeazScans : HttpSource() {
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
         val imageElements = document.select(
-            ".page-container img.protected-img, .reader-body img, .reading-content img",
+            ".page-container img.reader-page-image, .page-container img.protected-img, .reader-body img, .reading-content img",
         )
 
         val htmlPages = imageElements.mapIndexed { index, element ->
@@ -280,6 +281,15 @@ abstract class JeazScans : HttpSource() {
         val mangas = items.mapNotNull { it.toSManga(baseUrl) }
 
         return MangasPage(mangas, false)
+    }
+
+    // /api/imagen-capitulo answers 403 unless the request carries both a Referer and an image Accept.
+    override fun imageRequest(page: Page): Request {
+        val imageHeaders = headers.newBuilder()
+            .set("Referer", "$baseUrl/")
+            .set("Accept", "image/*")
+            .build()
+        return GET(page.imageUrl!!, imageHeaders)
     }
 
     override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
