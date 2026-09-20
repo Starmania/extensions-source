@@ -68,6 +68,12 @@ class FilterOptionDto(
     val isNsfw: Boolean = false,
 )
 
+@Serializable
+class FilterDataDto(
+    val genres: List<FilterOptionDto>,
+    val tags: List<FilterOptionDto>,
+)
+
 // ========================= Chapter DTOs =========================
 
 private val sqlDateFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneOffset.UTC)

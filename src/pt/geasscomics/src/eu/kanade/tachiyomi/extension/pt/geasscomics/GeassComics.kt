@@ -15,66 +15,54 @@ import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 
 @Source
 abstract class GeassComics :
-    HttpSource(),
+    KeiSource(),
     ConfigurableSource {
 
     private val apiUrl = "https://api.geasscomics.xyz"
 
-    override val supportsLatest = true
-
     private val preferences by getPreferencesLazy()
 
-    override val client: OkHttpClient by lazy {
-        network.client.newBuilder()
-            .addInterceptor { chain ->
-                val request = chain.request()
-                val token = getToken()
-                val newRequest = if (token.isNotEmpty()) {
-                    request.newBuilder()
-                        .header("Authorization", "Bearer $token")
-                        .build()
-                } else {
-                    request
-                }
-                chain.proceed(newRequest)
+    override fun OkHttpClient.Builder.configureClient() = apply {
+        addInterceptor { chain ->
+            val request = chain.request()
+            val token = getToken()
+            val newRequest = if (token.isNotEmpty()) {
+                request.newBuilder()
+                    .header("Authorization", "Bearer $token")
+                    .build()
+            } else {
+                request
             }
-            .rateLimit(2)
-            .addInterceptor(GeassComicsDescrambler)
-            .build()
+            chain.proceed(newRequest)
+        }
+        rateLimit(2)
+        addInterceptor(GeassComicsDescrambler)
     }
 
-    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
-        .add("Origin", baseUrl)
-        .add("Accept", "application/json, text/plain, */*")
-
-    private var cachedGenres: List<FilterOptionDto> = emptyList()
-    private var cachedTags: List<FilterOptionDto> = emptyList()
-    private var fetchFiltersAttempts = 0
-    private val scope = CoroutineScope(Dispatchers.IO)
-
-    private fun launchIO(block: () -> Unit) = scope.launch { block() }
+    override fun Headers.Builder.configureHeaders() = add("Accept", "application/json, text/plain, */*")
 
     // ============================= Auth ===================================
 
@@ -125,16 +113,12 @@ abstract class GeassComics :
     // ============================= Popular ================================
 
     // The ranking is capped at 50 entries and has no pagination.
-    override fun popularMangaRequest(page: Int): Request {
+    override suspend fun getPopularManga(page: Int): MangasPage {
         val url = "$apiUrl/api/ranking".toHttpUrl().newBuilder()
             .addQueryParameter("period", "all")
             .addQueryParameter("limit", "50")
             .build()
-        return GET(url, headers)
-    }
-
-    override fun popularMangaParse(response: Response): MangasPage {
-        val works = response.parseAs<ApiResponse<List<RankingEntryDto>>>().data.map { it.work }
+        val works = client.get(url).parseAs<ApiResponse<List<RankingEntryDto>>>().data.map { it.work }
         val mangas = works
             .filter { showNsfwPref() || !it.isNsfw }
             .map { it.toSManga() }
@@ -143,13 +127,11 @@ abstract class GeassComics :
 
     // ============================= Latest =================================
 
-    override fun latestUpdatesRequest(page: Int): Request = searchMangaRequest(page, "", FilterList())
-
-    override fun latestUpdatesParse(response: Response) = searchMangaParse(response)
+    override suspend fun getLatestUpdates(page: Int): MangasPage = getSearchMangaList(page, "", FilterList())
 
     // ============================= Search =================================
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val url = "$apiUrl/api/works".toHttpUrl().newBuilder()
             .addQueryParameter("page", page.toString())
             .addQueryParameter("limit", PAGE_LIMIT.toString())
@@ -190,73 +172,70 @@ abstract class GeassComics :
             }
         }
 
-        return GET(url.build(), headers)
-    }
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        val result = response.parseAs<ApiResponse<WorkListDto>>().data
+        val result = client.get(url.build()).parseAs<ApiResponse<WorkListDto>>().data
         return MangasPage(result.items.map { it.toSManga() }, result.hasNextPage())
     }
 
-    private fun fetchFilters() {
-        if (cachedGenres.isNotEmpty() && cachedTags.isNotEmpty()) return
-        if (fetchFiltersAttempts >= 3) return
-        fetchFiltersAttempts++
-
-        runCatching {
-            val genresRequest = GET("$apiUrl/api/genres", headers)
-            val genresResponse = client.newCall(genresRequest).execute()
-            if (genresResponse.isSuccessful) {
-                cachedGenres = genresResponse.parseAs<ApiResponse<List<FilterOptionDto>>>().data
-            }
-
-            val tagsRequest = GET("$apiUrl/api/tags", headers)
-            val tagsResponse = client.newCall(tagsRequest).execute()
-            if (tagsResponse.isSuccessful) {
-                cachedTags = tagsResponse.parseAs<ApiResponse<List<FilterOptionDto>>>().data
-            }
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host || url.pathSegments.firstOrNull() !in setOf("work", "obra")) {
+            return null
         }
+        val slug = url.pathSegments.getOrNull(1)?.takeIf { it.isNotBlank() } ?: return null
+        return fetchWork(slug).toSManga()
+    }
+
+    // ============================= Filters ================================
+
+    override val supportsFilterFetching = true
+
+    override suspend fun fetchFilterData(): JsonElement {
+        val genres = client.get("$apiUrl/api/genres").parseAs<ApiResponse<JsonElement>>().data
+        val tags = client.get("$apiUrl/api/tags").parseAs<ApiResponse<JsonElement>>().data
+        return buildJsonObject {
+            put("genres", genres)
+            put("tags", tags)
+        }
+    }
+
+    override fun getFilterList(data: JsonElement?): FilterList {
+        val filterData = data?.parseAs<FilterDataDto>()
+        val genres = filterData?.genres.orEmpty()
+            .filter { showNsfwPref() || !it.isNsfw }
+            .map { it.label to it.slug }
+        val tags = filterData?.tags.orEmpty().map { it.label to it.slug }
+
+        return getFilters(genres, tags)
     }
 
     // ============================= Details ================================
 
-    override fun mangaDetailsRequest(manga: SManga): Request {
-        val slug = manga.url.removePrefix("/manga/")
-        return GET("$apiUrl/api/works/$slug", headers)
-    }
+    private suspend fun fetchWork(slug: String): WorkDto = client.get("$apiUrl/api/works/$slug").parseAs<ApiResponse<WorkDto>>().data
 
-    override fun mangaDetailsParse(response: Response): SManga = response.parseAs<ApiResponse<WorkDto>>().data.toSManga()
-
-    // ============================= Chapters ===============================
-
-    override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val work = response.parseAs<ApiResponse<WorkDto>>().data
-        return work.chapters.map { it.toSChapter(work.slug) }
+    // Details and the chapter list share one response, so both are always returned.
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val work = fetchWork(manga.url.removePrefix("/manga/"))
+        return SMangaUpdate(work.toSManga(), work.chapters.map { it.toSChapter(work.slug) })
     }
 
     // ============================= Pages ==================================
 
     // Served by the site itself rather than the API host.
-    override fun pageListRequest(chapter: SChapter): Request {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val segments = "$baseUrl${chapter.url}".toHttpUrl().pathSegments
-        return GET("$baseUrl/api/read/${segments[2]}/${segments[3]}", headers)
-    }
-
-    override fun pageListParse(response: Response): List<Page> {
-        val result = response.parseAs<ReadDto>()
+        val result = client.get("$baseUrl/api/read/${segments[2]}/${segments[3]}").parseAs<ReadDto>()
         return result.pages.mapIndexed { index, url ->
             val scramble = result.pageScrambles.getOrNull(index)
             Page(index, imageUrl = if (scramble.isNullOrEmpty()) url else "$url#$scramble")
         }
     }
 
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
     override fun imageRequest(page: Page): Request {
         val newHeaders = headersBuilder()
-            .set("Referer", "$baseUrl/")
             .set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
             .build()
         return GET(page.imageUrl!!, newHeaders)
@@ -272,20 +251,6 @@ abstract class GeassComics :
     override fun getChapterUrl(chapter: SChapter): String {
         val pathSegments = "$baseUrl${chapter.url}".toHttpUrl().pathSegments
         return "$baseUrl/read/${pathSegments[2]}/${pathSegments[3]}"
-    }
-
-    // ============================= Filters ================================
-
-    override fun getFilterList(): FilterList {
-        launchIO { fetchFilters() }
-
-        val showNsfw = showNsfwPref()
-
-        val filteredGenres = (if (showNsfw) cachedGenres else cachedGenres.filter { !it.isNsfw })
-            .map { it.label to it.slug }
-        val filteredTags = cachedTags.map { it.label to it.slug }
-
-        return getFilters(filteredGenres, filteredTags)
     }
 
     // ============================= Preferences ============================

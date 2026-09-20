@@ -4,21 +4,17 @@ import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 
 fun getFilters(
-    genres: List<Pair<String, String>> = emptyList(),
-    tags: List<Pair<String, String>> = emptyList(),
+    genres: List<Pair<String, String>>,
+    tags: List<Pair<String, String>>,
 ): FilterList = FilterList(
-    listOf(
-        SortFilter(),
-        StatusFilter(),
-        Filter.Separator(),
-    ) + when {
-        genres.isEmpty() && tags.isEmpty() -> listOf(Filter.Header("Clique em 'Redefinir' para carregar os filtros"))
-        genres.isEmpty() -> listOf(Filter.Header("Clique em 'Redefinir' para carregar os gêneros"))
-        else -> listOf(GenreFilter(genres))
-    } + when {
-        genres.isEmpty() && tags.isEmpty() -> emptyList()
-        tags.isEmpty() -> listOf(Filter.Header("Clique em 'Redefinir' para carregar as tags"))
-        else -> listOf(TagFilter(tags))
+    buildList {
+        add(SortFilter())
+        add(StatusFilter())
+        if (genres.isNotEmpty() || tags.isNotEmpty()) {
+            add(Filter.Separator())
+        }
+        if (genres.isNotEmpty()) add(GenreFilter(genres))
+        if (tags.isNotEmpty()) add(TagFilter(tags))
     },
 )
 
