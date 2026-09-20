@@ -6,7 +6,12 @@ import keiyoushi.annotation.Source
 @Source
 abstract class BladeToons : MangoTheme() {
 
+    override val apiUrl = "https://api.bladetoons.com/api"
+
     override val cdnUrl = "https://cdn.bladetoons.com"
+
+    // The API answers 401 to anonymous requests, except for the top-10 list.
+    override val requiresLogin = true
 
     override val encryptionKey = "abmPisXlFjOLVTnYhbYQTpkWJtOGKwVttzLqstfjRBNVaEtQYG"
 
