@@ -6,12 +6,16 @@ plugins {
 
 keiyoushi {
     name = "Rncalation"
-    versionCode = 65
+    versionCode = 66
     contentWarning = ContentWarning.MIXED
-    libVersion = "1.4"
+    libVersion = "1.6"
 
     source {
         lang = "es"
         baseUrl = "https://rncalation.online"
+    }
+
+    deeplink {
+        path("/comics/..*")
     }
 }
