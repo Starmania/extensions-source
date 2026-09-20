@@ -23,7 +23,22 @@ abstract class Rncalation : HttpSource() {
 
     override val client = network.client.newBuilder()
         .rateLimit(2, 1.seconds)
+        .addInterceptor { chain ->
+            val request = chain.request()
+            val response = chain.proceed(request)
+            // Without a valid mv_ck cookie the site answers 200 with a JS page that sets it and
+            // reloads. The cookie is already in the jar by now, so replaying the request is enough.
+            if (response.isChallenge()) {
+                response.close()
+                chain.proceed(request)
+            } else {
+                response
+            }
+        }
         .build()
+
+    private fun Response.isChallenge() = header("Content-Type")?.startsWith("text/html") == true &&
+        peekBody(4096).string().contains("mv-verifying")
 
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
