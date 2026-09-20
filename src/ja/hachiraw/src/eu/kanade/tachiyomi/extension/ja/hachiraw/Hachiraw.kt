@@ -108,7 +108,7 @@ abstract class Hachiraw : HttpSource() {
                     setUrlWithoutDomain(it.attr("href"))
                     title = it.text()
                 }
-                thumbnail_url = element.selectFirst("img.img-fluid")?.absUrl("src")
+                thumbnail_url = element.selectFirst("img.img-fluid")?.absUrl("src")?.let(::coverUrl)
             }
         }
         val hasNextPage = document.selectFirst("ul.pagination li:contains(→)") != null
@@ -121,7 +121,7 @@ abstract class Hachiraw : HttpSource() {
         title = row.selectFirst("h1")!!.text()
         author = row.selectFirst("li.list-group-item:contains(著者)")?.ownText()
         genre = row.select("li.list-group-item:contains(ジャンル) a").joinToString { it.text() }
-        thumbnail_url = row.selectFirst("img.img-fluid")?.absUrl("src")
+        thumbnail_url = row.selectFirst("img.img-fluid")?.absUrl("src")?.let(::coverUrl)
         description = buildString {
             row.select("li.list-group-item:has(span.mlabel)").forEach {
                 val key = it.selectFirst("span")!!.text().removeSuffix(":")
@@ -161,6 +161,11 @@ abstract class Hachiraw : HttpSource() {
 
     override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
 
+    // Covers are advertised as Jetpack Photon URLs over cdn.kumaraw.com. That origin sits behind
+    // a Cloudflare challenge Photon cannot pass, so every cover 403s; the same files are served
+    // unprotected from cdn.hachiraw.net.
+    private fun coverUrl(src: String) = src.replace(PHOTON_KUMARAW, "https://cdn.hachiraw.net").substringBefore('?')
+
     override fun getFilterList() = FilterList(
         Filter.Header("タイトルで検索する場合、ジャンルフィルターは無視されます"),
         Filter.Separator(),
@@ -170,5 +175,6 @@ abstract class Hachiraw : HttpSource() {
 
     companion object {
         internal const val PREFIX_SLUG_SEARCH = "slug:"
+        private val PHOTON_KUMARAW = Regex("""^https://i\d\.wp\.com/cdn\.kumaraw\.com""")
     }
 }
