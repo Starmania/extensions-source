@@ -1,56 +1,46 @@
 package eu.kanade.tachiyomi.extension.es.lectormonline
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
 import okhttp3.Response
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.TimeZone
+import kotlin.time.Instant
 
 @Source
-abstract class MangoLibreria : HttpSource() {
+abstract class MangoLibreria : KeiSource() {
 
-    override val supportsLatest = true
+    private fun comicsUrl(page: Int) = "$baseUrl/comics".toHttpUrl().newBuilder()
+        .addQueryParameter("page", page.toString())
 
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
-
-    private val dateFormat by lazy {
-        SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT).apply {
-            timeZone = TimeZone.getTimeZone("UTC")
-        }
-    }
-
-    // ============================== Popular ==============================
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/comics?sort=views&page=$page", headers)
-
-    override fun popularMangaParse(response: Response): MangasPage {
-        val results = response.svelteData<ResultsDto>("results")
+    private suspend fun getComics(url: HttpUrl): MangasPage {
+        val results = client.get(url).svelteData<ResultsDto>("results")
         return MangasPage(
             results.comics.map { it.toSManga() },
             results.page < results.totalPages,
         )
     }
 
-    // ============================== Latest ===============================
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/comics?page=$page", headers)
+    // ============================== Popular ==============================
+    override suspend fun getPopularManga(page: Int): MangasPage = getComics(
+        comicsUrl(page).addQueryParameter("sort", "views").build(),
+    )
 
-    override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
+    // ============================== Latest ===============================
+    override suspend fun getLatestUpdates(page: Int): MangasPage = getComics(comicsUrl(page).build())
 
     // ============================== Search ===============================
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = "$baseUrl/comics".toHttpUrl().newBuilder().apply {
-            addQueryParameter("page", page.toString())
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val url = comicsUrl(page).apply {
             if (query.isNotBlank()) {
                 addQueryParameter("q", query.trim())
             } else {
@@ -58,34 +48,42 @@ abstract class MangoLibreria : HttpSource() {
             }
         }.build()
 
-        return GET(url, headers)
+        return getComics(url)
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = popularMangaParse(response)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host || url.pathSegments.getOrNull(0) != "comics") return null
+        val slug = url.pathSegments.getOrNull(1)?.takeIf { it.isNotEmpty() } ?: return null
 
-    // ============================== Details ==============================
-    override fun mangaDetailsParse(response: Response): SManga = response.svelteData<ComicDetailsDto>("comic").toSManga()
+        return client.get("$baseUrl/comics/$slug").svelteData<ComicDetailsDto>("comic").toSManga().apply {
+            this.url = "/comics/$slug"
+        }
+    }
 
-    // ============================= Chapters ==============================
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val comic = response.svelteData<ComicDetailsDto>("comic")
-        return comic.comicScans
+    // ======================= Details & Chapters ==========================
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val comic = client.get("$baseUrl${manga.url}").svelteData<ComicDetailsDto>("comic")
+        val chapterList = comic.comicScans
             .flatMap { scan ->
                 scan.chapters.map { ch ->
                     ch.toSChapter(scan.groupName).apply {
-                        date_upload = dateFormat.tryParse(ch.releaseDate)
+                        date_upload = Instant.tryParse(ch.releaseDate)
                     }
                 }
             }
             .sortedByDescending { it.chapter_number }
+        return SMangaUpdate(comic.toSManga(), chapterList)
     }
 
     // =============================== Pages ===============================
-    override fun pageListParse(response: Response): List<Page> = response.svelteData<ChapterPagesDto>("chapter").urlPages.mapIndexed { index, url ->
-        Page(index, imageUrl = proxiedImage(url))
-    }
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
+    override suspend fun getPageList(chapter: SChapter): List<Page> = client.get("$baseUrl${chapter.url}")
+        .svelteData<ChapterPagesDto>("chapter").urlPages
+        .mapIndexed { index, url -> Page(index, imageUrl = proxiedImage(url)) }
 
     // The site is SvelteKit: page data is inlined as a JS object literal (unquoted keys)
     // in the `kit.start(app, element, { data: [...] })` bootstrap script.
