@@ -25,7 +25,7 @@ abstract class HeavenManga : HttpSource() {
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
 
-    override fun popularMangaRequest(page: Int) = GET("$baseUrl/top?orderby=views&page=$page", headers)
+    override fun popularMangaRequest(page: Int) = GET("$baseUrl/top?orderby=views&pages=$page", headers)
 
     override fun popularMangaParse(response: Response): MangasPage {
         val document = response.asJsoup()
@@ -43,7 +43,7 @@ abstract class HeavenManga : HttpSource() {
     override fun latestUpdatesRequest(page: Int): Request = if (page == 1) {
         GET(baseUrl, headers)
     } else {
-        GET("$baseUrl?page=$page", headers)
+        GET("$baseUrl?pages=$page", headers)
     }
 
     override fun latestUpdatesParse(response: Response): MangasPage {
@@ -109,7 +109,7 @@ abstract class HeavenManga : HttpSource() {
             }
         }
 
-        if (page > 1) url.addQueryParameter("page", page.toString())
+        if (page > 1) url.addQueryParameter("pages", page.toString())
 
         return GET(url.build(), headers)
     }
