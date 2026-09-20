@@ -28,13 +28,7 @@ class PageDto(
 )
 
 @Serializable
-class ReaderDto(
-    val initialPages: List<PageDto>,
-    val totalPages: Int,
-    val pagesFetchUrl: String,
-)
-
-@Serializable
 class ReaderPagesDto(
     val items: List<PageDto>,
+    val total: Int,
 )

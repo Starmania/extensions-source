@@ -10,9 +10,10 @@ import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.annotation.Source
 import keiyoushi.network.rateLimit
 import keiyoushi.utils.asJsoup
-import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.runWebViewBlocking
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
 import kotlin.time.Duration.Companion.seconds
@@ -28,14 +29,11 @@ abstract class CodeArc : HttpSource() {
         .readTimeout(30.seconds)
         .rateLimit(1, 2.seconds) { it.host == baseUrlHost }
         .rateLimit(1, 1.seconds) { it.host == "cdn.codearctraducciones.com" }
+        .addInterceptor(::readerAccessInterceptor)
         .build()
 
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
-
-    private val rscHeaders = headersBuilder()
-        .add("RSC", "1")
-        .build()
 
     override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/ranking?mode=popular&page=$page", headers)
 
@@ -193,19 +191,20 @@ abstract class CodeArc : HttpSource() {
         return emptyList()
     }
 
-    override fun pageListRequest(chapter: SChapter): Request = GET(baseUrl + chapter.url, rscHeaders)
+    override fun pageListRequest(chapter: SChapter): Request {
+        val (slug, number) = CHAPTER_URL_REGEX.find(chapter.url)!!.destructured
+        return readerPagesRequest(slug, number, 0)
+    }
 
     override fun pageListParse(response: Response): List<Page> {
-        val readerData = response.extractNextJs<ReaderDto>() ?: return emptyList()
-        val pages = readerData.initialPages.toMutableList()
-        val pagesFetchUrl = baseUrl.toHttpUrl().resolve(readerData.pagesFetchUrl) ?: return emptyList()
+        val slug = response.request.url.queryParameter("slug")!!
+        val number = response.request.url.queryParameter("capitulo")!!
+        val result = response.parseAs<ReaderPagesDto>()
+        val pages = result.items.toMutableList()
 
-        while (pages.size < readerData.totalPages) {
-            val url = pagesFetchUrl.newBuilder()
-                .setQueryParameter("offset", pages.size.toString())
-                .build()
-            val newPages = client.newCall(GET(url, headers)).execute().use { apiResponse ->
-                apiResponse.parseAs<ReaderPagesDto>().items
+        while (pages.size < result.total) {
+            val newPages = client.newCall(readerPagesRequest(slug, number, pages.size)).execute().use {
+                it.parseAs<ReaderPagesDto>().items
             }
             if (newPages.isEmpty()) break
             pages += newPages
@@ -216,12 +215,48 @@ abstract class CodeArc : HttpSource() {
         }
     }
 
+    private fun readerPagesRequest(slug: String, number: String, offset: Int): Request {
+        val url = "$baseUrl/api/mangas/reader-pages".toHttpUrl().newBuilder()
+            .addQueryParameter("slug", slug)
+            .addQueryParameter("capitulo", number)
+            .addQueryParameter("mode", "cascade")
+            .addQueryParameter("offset", offset.toString())
+            .addQueryParameter("limit", PAGES_LIMIT.toString())
+            .build()
+        return GET(url, headers)
+    }
+
+    // The reader API answers 403 until the page's own script has passed a Cloudflare Turnstile
+    // challenge and exchanged it for an access cookie, so let the real reader page do that.
+    private fun readerAccessInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val response = chain.proceed(request)
+        if (response.code != 403 || !request.url.encodedPath.endsWith("/reader-pages")) return response
+        response.close()
+
+        val slug = request.url.queryParameter("slug")!!
+        val number = request.url.queryParameter("capitulo")!!
+        val probe = request.newBuilder().url(request.url.newBuilder().setQueryParameter("limit", "1").build()).build()
+        runWebViewBlocking<Unit>(chain.call(), 60.seconds) {
+            jsBridge("codearc") { resolve(Unit) }
+            poll(1.seconds) {
+                evaluateJs(
+                    "fetch('${probe.url}',{credentials:'same-origin'}).then(r=>{if(r.ok)codearc.post('ok')})",
+                )
+            }
+            loadUrl("$baseUrl/reader/$slug/$number/cascade")
+        }
+        return chain.proceed(request)
+    }
+
     override fun getFilterList(): FilterList = getFilters()
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
     private companion object {
         const val POPULAR_MAX_PAGE = 5
+        const val PAGES_LIMIT = 100
         val CHAPTER_NUM_REGEX = """/reader/[^/]+/(\d+)/""".toRegex()
+        val CHAPTER_URL_REGEX = """/reader/([^/]+)/([^/]+)/""".toRegex()
     }
 }
