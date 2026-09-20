@@ -1,44 +1,41 @@
 package eu.kanade.tachiyomi.extension.es.codearc
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.runWebViewBlocking
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
-import okhttp3.Request
+import okhttp3.OkHttpClient
 import okhttp3.Response
+import org.jsoup.nodes.Document
 import kotlin.time.Duration.Companion.seconds
 
 @Source
-abstract class CodeArc : HttpSource() {
+abstract class CodeArc : KeiSource() {
     private val baseUrlHost by lazy { baseUrl.toHttpUrl().host }
 
-    override val supportsLatest = true
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = apply {
+        connectTimeout(15.seconds)
+        readTimeout(30.seconds)
+        rateLimit(1, 2.seconds) { it.host == baseUrlHost }
+        rateLimit(1, 1.seconds) { it.host == "cdn.codearctraducciones.com" }
+        addInterceptor(::readerAccessInterceptor)
+    }
 
-    override val client = network.client.newBuilder()
-        .connectTimeout(15.seconds)
-        .readTimeout(30.seconds)
-        .rateLimit(1, 2.seconds) { it.host == baseUrlHost }
-        .rateLimit(1, 1.seconds) { it.host == "cdn.codearctraducciones.com" }
-        .addInterceptor(::readerAccessInterceptor)
-        .build()
-
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
-
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/ranking?mode=popular&page=$page", headers)
-
-    override fun popularMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val document = client.get("$baseUrl/ranking?mode=popular&page=$page").asJsoup()
 
         val mangas = document.select("a.group.relative.min-w-0[href]").map { element ->
             SManga.create().apply {
@@ -50,17 +47,14 @@ abstract class CodeArc : HttpSource() {
             }
         }
 
-        val currentPage = response.request.url.queryParameter("page")?.toIntOrNull() ?: 1
-        val hasNextPage = currentPage < POPULAR_MAX_PAGE && mangas.isNotEmpty() &&
+        val hasNextPage = page < POPULAR_MAX_PAGE && mangas.isNotEmpty() &&
             document.selectFirst("a[aria-label=Pagina siguiente]:not([disabled]), button[aria-label=Pagina siguiente]:not([disabled])") != null
         return MangasPage(mangas, hasNextPage)
     }
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/list?page=$page", headers)
+    override suspend fun getLatestUpdates(page: Int): MangasPage = parseMangaList(client.get("$baseUrl/list?page=$page").asJsoup())
 
-    override fun latestUpdatesParse(response: Response): MangasPage {
-        val document = response.asJsoup()
-
+    private fun parseMangaList(document: Document): MangasPage {
         val mangas = document.select("a.group.overflow-hidden[href]").map { element ->
             SManga.create().apply {
                 setUrlWithoutDomain(element.absUrl("href"))
@@ -78,14 +72,16 @@ abstract class CodeArc : HttpSource() {
         return MangasPage(mangas, hasNextPage)
     }
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         if (query.isNotEmpty() && filters.none { it is UriPartFilter && it.state != 0 } &&
             filters.none { it is GenreGroup && it.state.any { genre -> genre.state } }
         ) {
             val url = "$baseUrl/api/mangas/search".toHttpUrl().newBuilder()
                 .addQueryParameter("q", query)
                 .addQueryParameter("limit", "50")
-            return GET(url.build(), headers)
+                .build()
+            val result = client.get(url).parseAs<SearchResponseDto>()
+            return MangasPage(result.items.map { it.toSManga(baseUrl) }, false)
         }
 
         val url = "$baseUrl/list".toHttpUrl().newBuilder().apply {
@@ -118,47 +114,50 @@ abstract class CodeArc : HttpSource() {
                     else -> {}
                 }
             }
-        }
-        return GET(url.build(), headers)
+        }.build()
+        return parseMangaList(client.get(url).asJsoup())
     }
 
-    override fun searchMangaParse(response: Response): MangasPage {
-        if (response.request.url.pathSegments.contains("api")) {
-            val result = response.parseAs<SearchResponseDto>()
-            val mangas = result.items.map { it.toSManga(baseUrl) }
-            return MangasPage(mangas, false)
-        }
-        return latestUpdatesParse(response)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrlHost || url.pathSegments.size != 1) return null
+        val manga = SManga.create().apply { this.url = "/${url.pathSegments[0]}" }
+        return fetchMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false).manga
     }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
+    // Details and chapters both come from the manga page, so it is fetched once for either flag.
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get(baseUrl + manga.url).asJsoup()
+        return SMangaUpdate(parseMangaDetails(document), parseChapterList(document))
+    }
 
-        return SManga.create().apply {
-            title = document.selectFirst("h1")!!.text().replace("Vista Previa", "")
-            description = document.selectFirst("p.whitespace-pre-line")?.text()
-            thumbnail_url = document.selectFirst("meta[property=og:image]")?.attr("content")
-            genre = document.select("a[href*=/list?generos=]").joinToString { it.text() }
+    private fun parseMangaDetails(document: Document): SManga = SManga.create().apply {
+        title = document.selectFirst("h1")!!.text().replace("Vista Previa", "")
+        description = document.selectFirst("p.whitespace-pre-line")?.text()
+        thumbnail_url = document.selectFirst("meta[property=og:image]")?.attr("content")
+        genre = document.select("a[href*=/list?generos=]").joinToString { it.text() }
 
-            val htmlArtists = document.select("a[href*=/creador/]").joinToString { it.text() }
-            if (htmlArtists.isNotEmpty()) {
-                artist = htmlArtists
-                author = htmlArtists
-            }
+        val htmlArtists = document.select("a[href*=/creador/]").joinToString { it.text() }
+        if (htmlArtists.isNotEmpty()) {
+            artist = htmlArtists
+            author = htmlArtists
+        }
 
-            val statusText = document.selectFirst("span.inline-flex:has(span.rounded-full)")
-                ?.text()?.lowercase()
-            status = when {
-                statusText == null -> SManga.UNKNOWN
-                statusText.contains("finalizado") -> SManga.COMPLETED
-                statusText.contains("publicándose") || statusText.contains("publicandose") -> SManga.ONGOING
-                else -> SManga.UNKNOWN
-            }
+        val statusText = document.selectFirst("span.inline-flex:has(span.rounded-full)")
+            ?.text()?.lowercase()
+        status = when {
+            statusText == null -> SManga.UNKNOWN
+            statusText.contains("finalizado") -> SManga.COMPLETED
+            statusText.contains("publicándose") || statusText.contains("publicandose") -> SManga.ONGOING
+            else -> SManga.UNKNOWN
         }
     }
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
+    private fun parseChapterList(document: Document): List<SChapter> {
         val chapterLinks = document.select("a.group.block[href*=/reader/][href*=/cascade]")
 
         if (chapterLinks.isNotEmpty()) {
@@ -191,21 +190,14 @@ abstract class CodeArc : HttpSource() {
         return emptyList()
     }
 
-    override fun pageListRequest(chapter: SChapter): Request {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val (slug, number) = CHAPTER_URL_REGEX.find(chapter.url)!!.destructured
-        return readerPagesRequest(slug, number, 0)
-    }
+        val first = client.get(readerPagesUrl(slug, number, 0)).parseAs<ReaderPagesDto>()
+        val pages = first.items.toMutableList()
 
-    override fun pageListParse(response: Response): List<Page> {
-        val slug = response.request.url.queryParameter("slug")!!
-        val number = response.request.url.queryParameter("capitulo")!!
-        val result = response.parseAs<ReaderPagesDto>()
-        val pages = result.items.toMutableList()
-
-        while (pages.size < result.total) {
-            val newPages = client.newCall(readerPagesRequest(slug, number, pages.size)).execute().use {
-                it.parseAs<ReaderPagesDto>().items
-            }
+        while (pages.size < first.total) {
+            val newPages = client.get(readerPagesUrl(slug, number, pages.size))
+                .parseAs<ReaderPagesDto>().items
             if (newPages.isEmpty()) break
             pages += newPages
         }
@@ -215,16 +207,13 @@ abstract class CodeArc : HttpSource() {
         }
     }
 
-    private fun readerPagesRequest(slug: String, number: String, offset: Int): Request {
-        val url = "$baseUrl/api/mangas/reader-pages".toHttpUrl().newBuilder()
-            .addQueryParameter("slug", slug)
-            .addQueryParameter("capitulo", number)
-            .addQueryParameter("mode", "cascade")
-            .addQueryParameter("offset", offset.toString())
-            .addQueryParameter("limit", PAGES_LIMIT.toString())
-            .build()
-        return GET(url, headers)
-    }
+    private fun readerPagesUrl(slug: String, number: String, offset: Int): HttpUrl = "$baseUrl/api/mangas/reader-pages".toHttpUrl().newBuilder()
+        .addQueryParameter("slug", slug)
+        .addQueryParameter("capitulo", number)
+        .addQueryParameter("mode", "cascade")
+        .addQueryParameter("offset", offset.toString())
+        .addQueryParameter("limit", PAGES_LIMIT.toString())
+        .build()
 
     // The reader API answers 403 until the page's own script has passed a Cloudflare Turnstile
     // challenge and exchanged it for an access cookie, so let the real reader page do that.
@@ -236,22 +225,18 @@ abstract class CodeArc : HttpSource() {
 
         val slug = request.url.queryParameter("slug")!!
         val number = request.url.queryParameter("capitulo")!!
-        val probe = request.newBuilder().url(request.url.newBuilder().setQueryParameter("limit", "1").build()).build()
+        val probeUrl = request.url.newBuilder().setQueryParameter("limit", "1").build()
         runWebViewBlocking<Unit>(chain.call(), 60.seconds) {
             jsBridge("codearc") { resolve(Unit) }
             poll(1.seconds) {
-                evaluateJs(
-                    "fetch('${probe.url}',{credentials:'same-origin'}).then(r=>{if(r.ok)codearc.post('ok')})",
-                )
+                evaluateJs("fetch('$probeUrl',{credentials:'same-origin'}).then(r=>{if(r.ok)codearc.post('ok')})")
             }
             loadUrl("$baseUrl/reader/$slug/$number/cascade")
         }
         return chain.proceed(request)
     }
 
-    override fun getFilterList(): FilterList = getFilters()
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
+    override fun getFilterList(data: JsonElement?): FilterList = getFilters()
 
     private companion object {
         const val POPULAR_MAX_PAGE = 5
