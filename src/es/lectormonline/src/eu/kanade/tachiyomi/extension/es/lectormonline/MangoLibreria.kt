@@ -8,9 +8,8 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.annotation.Source
-import keiyoushi.utils.extractNextJs
+import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
-import kotlinx.serialization.json.JsonObject
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
@@ -26,54 +25,20 @@ abstract class MangoLibreria : HttpSource() {
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
 
-    override val client = network.client.newBuilder()
-        .addInterceptor { chain ->
-            val request = chain.request()
-            // The image CDN rejects requests with the main site's Referer header.
-            if (request.url.host != baseUrl.toHttpUrl().host) {
-                val newRequest = request.newBuilder()
-                    .removeHeader("Referer")
-                    .build()
-                chain.proceed(newRequest)
-            } else {
-                chain.proceed(request)
-            }
-        }
-        .build()
-
-    private val dateFormat1 by lazy {
+    private val dateFormat by lazy {
         SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT).apply {
             timeZone = TimeZone.getTimeZone("UTC")
         }
     }
 
-    private val dateFormat2 by lazy {
-        SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSSSSS", Locale.ROOT).apply {
-            timeZone = TimeZone.getTimeZone("UTC")
-        }
-    }
-
-    private val dateFormat3 by lazy {
-        SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT)
-    }
-
-    private fun parseDate(dateStr: String?): Long = dateFormat1.tryParse(dateStr)
-        .takeIf { it != 0L }
-        ?: dateFormat2.tryParse(dateStr)
-            .takeIf { it != 0L }
-        ?: dateFormat3.tryParse(dateStr)
-
     // ============================== Popular ==============================
     override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/comics?sort=views&page=$page", headers)
 
     override fun popularMangaParse(response: Response): MangasPage {
-        val props = response.extractNextJs<ComicsDataProps> {
-            it is JsonObject && "comicsData" in it
-        }
-        val comics = props!!.comicsData.comics
+        val results = response.svelteData<ResultsDto>("results")
         return MangasPage(
-            comics.map { it.toSManga() },
-            props.comicsData.page < props.comicsData.totalPages,
+            results.comics.map { it.toSManga() },
+            results.page < results.totalPages,
         )
     }
 
@@ -99,40 +64,65 @@ abstract class MangoLibreria : HttpSource() {
     override fun searchMangaParse(response: Response): MangasPage = popularMangaParse(response)
 
     // ============================== Details ==============================
-    override fun mangaDetailsParse(response: Response): SManga {
-        val props = response.extractNextJs<ComicDataProps> {
-            it is JsonObject && "comicData" in it
-        }
-        return props!!.comicData.toSManga()
-    }
+    override fun mangaDetailsParse(response: Response): SManga = response.svelteData<ComicDetailsDto>("comic").toSManga()
 
     // ============================= Chapters ==============================
     override fun chapterListParse(response: Response): List<SChapter> {
-        val props = response.extractNextJs<ComicDataProps> {
-            it is JsonObject && "comicData" in it
-        }
-
-        val chapters = props!!.comicData.scanGroups?.flatMap { group ->
-            val groupName = group.name
-            group.chapters.map { ch ->
-                ch.toSChapter(groupName).apply {
-                    date_upload = parseDate(ch.dateString)
+        val comic = response.svelteData<ComicDetailsDto>("comic")
+        return comic.comicScans
+            .flatMap { scan ->
+                scan.chapters.map { ch ->
+                    ch.toSChapter(scan.groupName).apply {
+                        date_upload = dateFormat.tryParse(ch.releaseDate)
+                    }
                 }
             }
-        } ?: emptyList()
-
-        return chapters.sortedByDescending { it.chapter_number }
+            .sortedByDescending { it.chapter_number }
     }
 
     // =============================== Pages ===============================
-    override fun pageListParse(response: Response): List<Page> {
-        val props = response.extractNextJs<ComicDataProps> {
-            it is JsonObject && "comicData" in it
-        }
-        return props!!.comicData.urlPages?.mapIndexed { index, url ->
-            Page(index, imageUrl = url)
-        } ?: emptyList()
+    override fun pageListParse(response: Response): List<Page> = response.svelteData<ChapterPagesDto>("chapter").urlPages.mapIndexed { index, url ->
+        Page(index, imageUrl = proxiedImage(url))
     }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
+
+    // The site is SvelteKit: page data is inlined as a JS object literal (unquoted keys)
+    // in the `kit.start(app, element, { data: [...] })` bootstrap script.
+    private inline fun <reified T> Response.svelteData(key: String): T = use {
+        val nodes = it.body.string().svelteDataToJson().parseAs<List<SvelteNode>>()
+        nodes.firstNotNullOf { node -> node.data?.get(key) }.parseAs<T>()
+    }
+
+    private fun String.svelteDataToJson(): String {
+        var i = indexOf('[', indexOf("data:", indexOf("kit.start(")))
+        val out = StringBuilder()
+        var depth = 0
+        do {
+            val c = this[i++]
+            out.append(c)
+            when (c) {
+                '"' -> while (true) {
+                    val s = this[i++]
+                    out.append(s)
+                    if (s == '\\') {
+                        out.append(this[i++])
+                    } else if (s == '"') {
+                        break
+                    }
+                }
+                '[', '{' -> depth++
+                ']', '}' -> depth--
+            }
+            if (c == '{' || c == ',') {
+                var end = i
+                while (this[end].isLetterOrDigit() || this[end] == '_' || this[end] == '$') end++
+                if (end > i && this[end] == ':') {
+                    out.append('"').append(this, i, end).append('"')
+                    i = end
+                }
+            }
+        } while (depth > 0)
+        return out.toString()
+    }
 }

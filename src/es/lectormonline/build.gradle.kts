@@ -6,13 +6,13 @@ plugins {
 
 keiyoushi {
     name = "MangoLibreria"
-    versionCode = 2
+    versionCode = 3
     contentWarning = ContentWarning.MIXED
     libVersion = "1.4"
 
     source {
         lang = "es"
-        baseUrl = "https://mangolibreria.com"
+        baseUrl = "https://lectorfenix.com"
         versionId = 2
     }
 }

@@ -4,14 +4,16 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
+import okhttp3.HttpUrl.Companion.toHttpUrl
 
 @Serializable
-class ComicsDataProps(
-    val comicsData: ComicsData,
+class SvelteNode(
+    val data: JsonObject? = null,
 )
 
 @Serializable
-class ComicsData(
+class ResultsDto(
     val comics: List<ComicDto> = emptyList(),
     val page: Int = 1,
     val totalPages: Int = 1,
@@ -19,48 +21,38 @@ class ComicsData(
 
 @Serializable
 class ComicDto(
-    private val name: String,
-    private val urlPath: String? = null,
-    @SerialName("comic_path") private val comicPath: String? = null,
-    private val urlCover: String? = null,
-    @SerialName("cover_image") private val coverImage: String? = null,
-    private val state: String? = null,
+    private val title: String,
+    private val comicPath: String,
+    private val coverImage: String? = null,
+    private val status: String? = null,
     private val genres: List<String>? = null,
     private val description: String? = null,
 ) {
     fun toSManga() = SManga.create().apply {
-        title = name
-        url = (urlPath ?: comicPath)!!
-        thumbnail_url = urlCover ?: coverImage
-        this.description = this@ComicDto.description
+        title = this@ComicDto.title
+        url = comicPath
+        thumbnail_url = coverImage?.let(::proxiedImage)
+        description = this@ComicDto.description
         genre = genres?.joinToString()
-        status = parseStatus(state)
+        status = parseStatus(this@ComicDto.status)
     }
 }
 
 @Serializable
-class ComicDataProps(
-    val comicData: ComicDetailsDto,
-)
-
-@Serializable
 class ComicDetailsDto(
-    private val name: String? = null,
-    private val title: String? = null,
+    private val title: String,
     private val description: String? = null,
-    @SerialName("cover_image") private val coverImage: String? = null,
-    private val urlCover: String? = null,
-    private val state: String? = null,
+    private val coverImage: String? = null,
+    private val status: String? = null,
     private val genres: List<GenreDto>? = null,
-    @SerialName("scan_groups") val scanGroups: List<ScanGroupDto>? = null,
-    @SerialName("url_pages") val urlPages: List<String>? = null,
+    val comicScans: List<ComicScanDto> = emptyList(),
 ) {
     fun toSManga() = SManga.create().apply {
-        this.title = (this@ComicDetailsDto.title ?: this@ComicDetailsDto.name)!!
-        this.description = this@ComicDetailsDto.description
-        thumbnail_url = urlCover ?: coverImage
+        title = this@ComicDetailsDto.title
+        description = this@ComicDetailsDto.description
+        thumbnail_url = coverImage?.let(::proxiedImage)
         genre = genres?.joinToString { it.name }
-        status = parseStatus(state)
+        status = parseStatus(this@ComicDetailsDto.status)
     }
 }
 
@@ -70,28 +62,43 @@ class GenreDto(
 )
 
 @Serializable
+class ComicScanDto(
+    private val scanGroup: ScanGroupDto? = null,
+    val chapters: List<ChapterDto> = emptyList(),
+) {
+    val groupName: String? get() = scanGroup?.name
+}
+
+@Serializable
 class ScanGroupDto(
     val name: String? = null,
-    val chapters: List<ChapterDto> = emptyList(),
 )
 
 @Serializable
 class ChapterDto(
-    @SerialName("chapter_number") private val chapterNumber: String,
-    private val title: String? = null,
-    @SerialName("release_date") private val releaseDate: String? = null,
-    @SerialName("created_at") private val createdAt: String? = null,
-    @SerialName("chapter_path") private val chapterPath: String? = null,
+    private val chapterNumber: Float,
+    private val chapterPath: String,
+    val releaseDate: String? = null,
 ) {
     fun toSChapter(groupName: String?) = SChapter.create().apply {
-        name = this@ChapterDto.title ?: "Capítulo ${chapterNumber.removeSuffix(".0")}"
-        url = chapterPath!!
+        // The API's chapter title is the series title, so it can't tell chapters apart.
+        name = "Capítulo ${chapterNumber.toString().removeSuffix(".0")}"
+        url = chapterPath
         scanlator = groupName
-        chapter_number = chapterNumber.toFloatOrNull() ?: -1f
+        chapter_number = chapterNumber
     }
-
-    val dateString: String? get() = releaseDate ?: createdAt
 }
+
+@Serializable
+class ChapterPagesDto(
+    @SerialName("url_pages") val urlPages: List<String> = emptyList(),
+)
+
+// The image CDN blocks direct requests; the site itself loads every image through this proxy.
+internal fun proxiedImage(url: String): String = "https://mango-proxy-image.zincbaq.workers.dev/".toHttpUrl().newBuilder()
+    .addQueryParameter("url", url)
+    .build()
+    .toString()
 
 internal fun parseStatus(state: String?): Int = when (state?.uppercase()) {
     "ONGOING" -> SManga.ONGOING
