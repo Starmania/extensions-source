@@ -1,154 +1,88 @@
 package eu.kanade.tachiyomi.multisrc.spicytheme
 
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.parseAs
-import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrl
+import kotlinx.serialization.json.JsonObject
+import okhttp3.Headers
 import okhttp3.Request
 import okhttp3.Response
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.TimeZone
 
 abstract class SpicyTheme : HttpSource() {
 
-    protected open val apiBaseUrl: String
-        get() = baseUrl.replace("https://", "https://api.")
-
     override val supportsLatest = true
 
-    override fun headersBuilder() = super.headersBuilder()
+    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .set("Referer", "$baseUrl/")
         .set("Origin", baseUrl)
+        .set("rsc", "1")
 
-    private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", Locale.US).apply {
-        timeZone = TimeZone.getTimeZone("UTC")
-    }
+    // The site has no listing API: /comics embeds the whole catalog (a few dozen series) in
+    // one payload and filters/sorts client-side, so everything below does the same.
+    private fun catalogRequest(): Request = GET("$baseUrl/comics", headers)
 
-    private fun filterUrlBuilder(
-        page: Int,
-        orderBy: String = SortFilter.ID_LATEST,
-    ): HttpUrl.Builder = "$apiBaseUrl/filtrar".toHttpUrl().newBuilder()
-        .addQueryParameter("page", page.toString())
-        .addQueryParameter("limit", PAGE_SIZE.toString())
-        .addQueryParameter("orderBy", orderBy)
-        .addQueryParameter("sort", "desc")
-        .addQueryParameter("gendersId", "")
-        .addQueryParameter("origin", "")
-        .addQueryParameter("state", "")
-        .addQueryParameter("loading", "true")
+    private fun catalog(response: Response): List<MangaDto> = response.extractNextJs<List<MangaDto>>()
+        ?: throw Exception("No se pudo leer el catálogo")
 
-    override fun popularMangaRequest(page: Int): Request {
-        val url = filterUrlBuilder(page, SortFilter.ID_POPULAR).build()
-        return GET(url, headers)
-    }
+    override fun popularMangaRequest(page: Int): Request = catalogRequest()
 
-    override fun popularMangaParse(response: Response): MangasPage = response.parseAs<FilterResponseDto>().toMangasPage()
+    override fun popularMangaParse(response: Response): MangasPage = MangasPage(
+        catalog(response).sortedByDescending { it.views }.map { it.toSManga() },
+        false,
+    )
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        if (query.isNotEmpty()) {
-            if (query.length < 2) {
-                throw Exception("Escribe al menos 2 caracteres para buscar")
-            }
-            val url = "$apiBaseUrl/home/buscar".toHttpUrl().newBuilder()
-                .addQueryParameter("query", query)
-                .build()
+    override fun latestUpdatesRequest(page: Int): Request = catalogRequest()
 
-            return GET(url, headers)
-        }
+    override fun latestUpdatesParse(response: Response): MangasPage = MangasPage(
+        catalog(response).sortedByDescending { it.lastUpdate }.map { it.toSManga() },
+        false,
+    )
 
-        val url = filterUrlBuilder(page)
-        filters.forEach { filter ->
-            when (filter) {
-                is SortFilter -> {
-                    url.setQueryParameter("orderBy", filter.toUriPart())
-                    url.setQueryParameter("sort", filter.getSortDirection())
-                }
-
-                is UriMultiSelectFilter -> {
-                    val value = filter.toUriPart()
-                    if (value.isNotEmpty()) {
-                        url.setQueryParameter(filter.queryParameter, filter.toUriPart())
-                    }
-                }
-
-                else -> {}
-            }
-        }
-
-        return GET(url.build(), headers)
-    }
+    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = catalogRequest().newBuilder()
+        .tag(String::class.java, query.trim().lowercase())
+        .build()
 
     override fun searchMangaParse(response: Response): MangasPage {
-        val isTextSearch = response.request.url.queryParameter("query") != null
-        if (isTextSearch) {
-            val result = response.parseAs<List<MangaDto>>()
-            return MangasPage(
-                mangas = result.map { it.toSManga() },
-                hasNextPage = false,
-            )
-        }
-
-        return response.parseAs<FilterResponseDto>().toMangasPage()
+        val query = response.request.tag(String::class.java).orEmpty()
+        return MangasPage(
+            catalog(response)
+                .filter { query in it.name.lowercase() || query in it.alternativeName.orEmpty().lowercase() }
+                .map { it.toSManga() },
+            false,
+        )
     }
 
-    override fun latestUpdatesRequest(page: Int): Request {
-        val url = filterUrlBuilder(page, SortFilter.ID_LATEST).build()
-        return GET(url, headers)
-    }
+    override fun mangaDetailsRequest(manga: SManga): Request = GET("$baseUrl/ver/${manga.url}", headers)
 
-    override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
-
-    override fun mangaDetailsRequest(manga: SManga): Request = GET("$apiBaseUrl/serie/${manga.url}", headers)
-
-    override fun mangaDetailsParse(response: Response): SManga {
-        val result = response.parseAs<SeriesResponseDto>()
-        return result.series.toSMangaDetails()
-    }
+    override fun mangaDetailsParse(response: Response): SManga = seriesFrom(response).toSMangaDetails()
 
     override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val result = response.parseAs<SeriesResponseDto>().series
-        return result.chapters.orEmpty().map {
-            it.toSChapter(result.slug, dateFormat)
-        }
+        val series = seriesFrom(response)
+        return series.chapters.orEmpty().map { it.toSChapter(series.slug) }
     }
 
-    override fun pageListRequest(chapter: SChapter): Request = GET("$apiBaseUrl/serie/${chapter.url}/")
+    private fun seriesFrom(response: Response): MangaDto = response.extractNextJs<MangaDto> { it is JsonObject && "lastChapters" in it }
+        ?: throw Exception("No se pudo leer la serie")
+
+    override fun pageListRequest(chapter: SChapter): Request = GET("$baseUrl/ver/${chapter.url}", headers)
 
     override fun pageListParse(response: Response): List<Page> {
-        val result = response.parseAs<PagesResponseDto>()
-        val pages = result.pages.rawImages.parseAs<List<String>>()
-
-        return pages.mapIndexed { index, url ->
-            Page(index, imageUrl = url)
-        }
+        val chapter = response.extractNextJs<PagesDto>()
+            ?: throw Exception("No se pudo leer el capítulo")
+        return chapter.pages.rawImages.parseAs<List<String>>().mapIndexed { i, url -> Page(i, imageUrl = url) }
     }
 
-    override fun getFilterList() = FilterList(
-        Filter.Header("Los filtros no se aplican a la búsqueda por texto"),
-        SortFilter(),
-        Filter.Separator(),
-        OriginFilter(),
-        GenreFilter(),
-        StatusFilter(),
-    )
+    override fun getMangaUrl(manga: SManga): String = "$baseUrl/ver/${manga.url}"
 
-    override fun getMangaUrl(manga: SManga): String = "$baseUrl/comic/${manga.url}"
-
-    override fun getChapterUrl(chapter: SChapter): String = "$baseUrl/comic/${chapter.url}"
+    override fun getChapterUrl(chapter: SChapter): String = "$baseUrl/ver/${chapter.url}"
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
-    companion object {
-        private const val PAGE_SIZE = 12
-    }
 }

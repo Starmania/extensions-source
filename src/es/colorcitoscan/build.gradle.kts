@@ -13,6 +13,6 @@ keiyoushi {
 
     source {
         lang = "es"
-        baseUrl = "https://colorcitoscan.com"
+        baseUrl = "https://coloresito.site"
     }
 }
