@@ -18,6 +18,7 @@ import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.nodes.Document
 import java.text.SimpleDateFormat
 import java.util.Locale
 
@@ -47,14 +48,7 @@ abstract class BlackoutComics : HttpSource() {
 
     override fun popularMangaParse(response: Response): MangasPage {
         val doc = response.asJsoup()
-        val mangas = doc.select(".ranking-grid a.webtoon-card").map { el ->
-            SManga.create().apply {
-                setUrlWithoutDomain(el.attr("abs:href"))
-                title = el.select(".card-title span").text()
-                thumbnail_url = el.select(".card-thumb img").attr("abs:src")
-            }
-        }
-        return MangasPage(mangas, false)
+        return MangasPage(doc.parseCards(".ranking-grid a.webtoon-card"), false)
     }
 
     // =============================== Latest ===============================
@@ -62,52 +56,25 @@ abstract class BlackoutComics : HttpSource() {
 
     override fun latestUpdatesParse(response: Response): MangasPage {
         val doc = response.asJsoup()
-        val mangas = doc.select(".webtoon-grid a.webtoon-card").map { el ->
-            SManga.create().apply {
-                setUrlWithoutDomain(el.attr("abs:href"))
-                title = el.select(".card-title span").text()
-                thumbnail_url = el.select(".card-thumb img").attr("abs:src")
-            }
-        }
+        val mangas = doc.parseCards(".webtoon-grid a.webtoon-card")
         val hasNext = doc.select(".pagerx__link[rel=next]").isNotEmpty()
         return MangasPage(mangas, hasNext)
     }
 
     // =============================== Search ===============================
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        if (query.isNotBlank()) {
-            val url = "$baseUrl/comics".toHttpUrl().newBuilder()
-                .addQueryParameter("src", query)
-                .addQueryParameter("format", "json")
-                .build()
-            return GET(url, headers)
-        }
-
         val url = "$baseUrl/comics".toHttpUrl().newBuilder()
         val status = filters.firstInstanceOrNull<StatusFilter>()?.toUriPart()
         val genre = filters.firstInstanceOrNull<GenreFilter>()?.toUriPart()
 
+        if (query.isNotBlank()) url.addQueryParameter("src", query)
         if (!status.isNullOrEmpty()) url.addQueryParameter("status", status)
         if (!genre.isNullOrEmpty()) url.addQueryParameter("gen", genre)
 
         return GET(url.build(), headers)
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = if (response.request.url.queryParameter("format") == "json") {
-        val searchResponse = response.parseAs<SearchResponse>()
-        val mangas = searchResponse.items.map { it.toSManga(baseUrl) }
-        MangasPage(mangas, false)
-    } else {
-        val doc = response.asJsoup()
-        val mangas = doc.select(".webtoon-grid a.webtoon-card").map { el ->
-            SManga.create().apply {
-                setUrlWithoutDomain(el.attr("abs:href"))
-                title = el.select(".card-title span").text()
-                thumbnail_url = el.select(".card-thumb img").attr("abs:src")
-            }
-        }
-        MangasPage(mangas, false)
-    }
+    override fun searchMangaParse(response: Response): MangasPage = MangasPage(response.asJsoup().parseCards(".webtoon-grid a.webtoon-card"), false)
 
     // =========================== Manga Details ============================
     override fun mangaDetailsParse(response: Response): SManga {
@@ -169,7 +136,8 @@ abstract class BlackoutComics : HttpSource() {
             }
         }
 
-        if (doc.html().contains("showLoginModal()")) {
+        // Anonymous visitors are redirected from the reader to /login, which bounces on to the home page.
+        if ("/ler/" !in response.request.url.encodedPath || doc.html().contains("showLoginModal()")) {
             throw Exception(
                 "Necessário fazer login. Abra o site no WebView (ícone de navegador " +
                     "no canto superior direito), faça login com sua conta e tente novamente.",
@@ -199,6 +167,14 @@ abstract class BlackoutComics : HttpSource() {
     )
 
     // ============================== Utilities =============================
+    private fun Document.parseCards(selector: String) = select(selector).map { el ->
+        SManga.create().apply {
+            setUrlWithoutDomain(el.attr("abs:href"))
+            title = el.select(".card-title span").text()
+            thumbnail_url = el.select(".card-thumb img").attr("abs:src")
+        }
+    }
+
     private fun ageGateInterceptor(chain: Interceptor.Chain): Response {
         val original = chain.request()
         val url = original.url
