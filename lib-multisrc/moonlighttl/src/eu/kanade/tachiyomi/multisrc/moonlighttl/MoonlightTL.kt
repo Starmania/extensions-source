@@ -1,27 +1,20 @@
 package eu.kanade.tachiyomi.multisrc.moonlighttl
 
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.lib.i18n.Intl
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
-import okhttp3.Request
-import okhttp3.Response
-import rx.Observable
+import kotlinx.serialization.json.JsonElement
 import kotlin.math.min
 
-abstract class MoonlightTL : HttpSource() {
-    override val supportsLatest = true
-
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
-
+abstract class MoonlightTL : KeiSource() {
     protected val intl = Intl(
         lang,
         setOf("en", "es"),
@@ -31,10 +24,8 @@ abstract class MoonlightTL : HttpSource() {
 
     private val seriesPath = "/ver"
 
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/api/topSerie", headers)
-
-    override fun popularMangaParse(response: Response): MangasPage {
-        val responseData = response.parseAs<ResponseDto<TopSeriesDto>>()
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val responseData = client.get("$baseUrl/api/topSerie").parseAs<ResponseDto<TopSeriesDto>>()
 
         val topDaily = responseData.response.topDaily.flatten().map { it.data }
         val topWeekly = responseData.response.topWeekly.flatten().map { it.data }
@@ -46,10 +37,8 @@ abstract class MoonlightTL : HttpSource() {
         return MangasPage(mangas, false)
     }
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/api/lastUpdates", headers)
-
-    override fun latestUpdatesParse(response: Response): MangasPage {
-        val responseData = response.parseAs<ResponseDto<List<SeriesDto>>>()
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        val responseData = client.get("$baseUrl/api/lastUpdates").parseAs<ResponseDto<List<SeriesDto>>>()
 
         val mangas = responseData.response
             .map { it.toSManga(seriesPath) }
@@ -59,22 +48,12 @@ abstract class MoonlightTL : HttpSource() {
 
     private var comicsList = listOf<SeriesDto>()
 
-    override fun fetchSearchManga(
-        page: Int,
-        query: String,
-        filters: FilterList,
-    ): Observable<MangasPage> = if (comicsList.isEmpty()) {
-        client.newCall(searchMangaRequest(page, query, filters))
-            .asObservableSuccess()
-            .map {
-                comicsList = it.parseAs<ResponseDto<List<SeriesDto>>>().response
-                applyFilters(comicsList, page, query, filters)
-            }
-    } else {
-        Observable.just(applyFilters(comicsList, page, query, filters))
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        if (comicsList.isEmpty()) {
+            comicsList = client.get("$baseUrl/api/comics").parseAs<ResponseDto<List<SeriesDto>>>().response
+        }
+        return applyFilters(comicsList, page, query, filters)
     }
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = GET("$baseUrl/api/comics", headers)
 
     private fun applyFilters(comics: List<SeriesDto>, page: Int, query: String, filterList: FilterList): MangasPage {
         var filteredList = mutableListOf<SeriesDto>()
@@ -122,41 +101,30 @@ abstract class MoonlightTL : HttpSource() {
         )
     }
 
-    override fun getFilterList() = getFilters(intl)
+    override fun getFilterList(data: JsonElement?) = getFilters(intl)
 
-    override fun getMangaUrl(manga: SManga) = "$baseUrl${manga.url}"
-
-    override fun mangaDetailsRequest(manga: SManga): Request {
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
         val slug = manga.url.substringAfterLast('/')
-        return GET("$baseUrl/api/showProject/$slug", headers)
+        val series = client.get("$baseUrl/api/showProject/$slug").parseAs<ResponseDto<SeriesDto>>().response
+        return SMangaUpdate(
+            series.toSMangaDetails(intl),
+            series.chapters.map { it.toSChapter(seriesPath, series.slug, intl) },
+        )
     }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val series = response.parseAs<ResponseDto<SeriesDto>>().response
-        return series.toSMangaDetails(intl)
-    }
-
-    override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val series = response.parseAs<ResponseDto<SeriesDto>>().response
-        return series.chapters.map { it.toSChapter(seriesPath, series.slug, intl) }
-    }
-
-    override fun pageListRequest(chapter: SChapter): Request {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val (seriesSlug, chapterSlug) = chapter.url.removePrefix("$seriesPath/").split('/')
-        return GET("$baseUrl/api/showProject/$seriesSlug/$chapterSlug", headers)
-    }
-
-    override fun pageListParse(response: Response): List<Page> {
-        val chapter = response.parseAs<ResponseDto<ChapterPagesDto>>().response
-        return chapter.pages.urlImg.parseAs<List<String>>().mapIndexed { i, url ->
+        val response = client.get("$baseUrl/api/showProject/$seriesSlug/$chapterSlug")
+            .parseAs<ResponseDto<ChapterPagesDto>>().response
+        return response.pages.urlImg.parseAs<List<String>>().mapIndexed { i, url ->
             Page(i, imageUrl = url)
         }
     }
-
-    override fun searchMangaParse(response: Response): MangasPage = throw UnsupportedOperationException()
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
     companion object {
         const val MANGAS_PER_PAGE = 15
