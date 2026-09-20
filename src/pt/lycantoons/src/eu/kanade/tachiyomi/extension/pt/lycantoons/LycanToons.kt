@@ -1,50 +1,46 @@
 package eu.kanade.tachiyomi.extension.pt.lycantoons
 
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonRequestBody
-import okhttp3.Request
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
 import okhttp3.Response
-import rx.Observable
 
 @Source
-abstract class LycanToons : HttpSource() {
+abstract class LycanToons : KeiSource() {
 
-    override val supportsLatest = true
-
-    override val client = network.client.newBuilder()
-        .addInterceptor(WebViewInterceptor(baseUrl, headers["User-Agent"]))
+    override fun OkHttpClient.Builder.configureClient() = addInterceptor(WebViewInterceptor(baseUrl, headers["User-Agent"]))
         .rateLimit(2)
-        .build()
-
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
 
     // =====================Popular=====================
 
-    override fun popularMangaRequest(page: Int): Request = metricsRequest("popular", page)
-
-    override fun popularMangaParse(response: Response): MangasPage = response.parseAs<PopularResponse>().toMangasPage()
+    override suspend fun getPopularManga(page: Int): MangasPage = client.get("$baseUrl/api/metrics/popular?limit=$PAGE_LIMIT&page=$page")
+        .parseAs<PopularResponse>()
+        .toMangasPage()
 
     // =====================Latest=====================
 
-    override fun latestUpdatesRequest(page: Int): Request = metricsRequest("recently-updated", page)
-
-    override fun latestUpdatesParse(response: Response): MangasPage = response.parseAs<PopularResponse>().toMangasPage()
+    override suspend fun getLatestUpdates(page: Int): MangasPage = client.get("$baseUrl/api/metrics/recently-updated?limit=$PAGE_LIMIT&page=$page")
+        .parseAs<PopularResponse>()
+        .toMangasPage()
 
     // =====================Search=====================
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         var search = query
         val tags = filters.selectedTags().toMutableList()
 
@@ -63,73 +59,78 @@ abstract class LycanToons : HttpSource() {
             tags = tags.distinct(),
         )
 
-        return POST("$baseUrl/api/series", headers, payload.toJsonRequestBody())
+        return client.post("$baseUrl/api/series", headers, payload.toJsonRequestBody())
+            .parseAs<SearchResponse>()
+            .toMangasPage()
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = response.parseAs<SearchResponse>().toMangasPage()
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host || url.pathSegments.firstOrNull() != "series") return null
+        val slug = url.pathSegments.getOrNull(1) ?: return null
 
-    override fun getFilterList(): FilterList = LycanToonsFilters.get()
+        return getRsc("$baseUrl/series/$slug").extractNextJs<SeriesDto>()!!.toSManga()
+    }
+
+    override fun getFilterList(data: JsonElement?): FilterList = LycanToonsFilters.get()
 
     // =====================Details=====================
 
-    override fun getMangaUrl(manga: SManga): String = "$baseUrl${manga.url}"
-
-    override fun mangaDetailsRequest(manga: SManga): Request = rscRequest("$baseUrl/series/${manga.slug()}")
-
-    override fun mangaDetailsParse(response: Response): SManga = response.extractNextJs<SeriesDto>()!!.toSManga()
-
-    // =====================Chapters=====================
-
-    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable.fromCallable {
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
         val slug = manga.slug()
 
-        val response = client.newCall(chapterPageRequest(slug)).execute()
+        val details = if (fetchDetails) {
+            getRsc("$baseUrl/series/$slug").extractNextJs<SeriesDto>()!!.toSManga()
+        } else {
+            manga
+        }
 
-        response.extractNextJs<ChapterResponse>()?.capitulos!!
-            .map { it.toSChapter(slug) }
-            .sortedByDescending { it.chapter_number }
+        val chapterList = if (fetchChapters) {
+            getRsc("$baseUrl/series/$slug/1").extractNextJs<ChapterResponse>()!!.capitulos
+                .map { it.toSChapter(slug) }
+                .sortedByDescending { it.chapter_number }
+        } else {
+            chapters
+        }
+
+        return SMangaUpdate(details, chapterList)
     }
-
-    private fun chapterPageRequest(slug: String): Request = rscRequest("$baseUrl/series/$slug/1")
-
-    override fun chapterListParse(response: Response): List<SChapter> = throw UnsupportedOperationException()
 
     // =====================Pages========================
 
-    override fun pageListRequest(chapter: SChapter): Request = rscRequest("$baseUrl${chapter.url}")
-
     // The chapter page no longer embeds its images (`initialPages` is null); the reader loads them
     // from this API using the chapter id found in the page.
-    override fun pageListParse(response: Response): List<Page> {
-        val chapterId = response.extractNextJs<ChapterRefDto>()!!.capituloId
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val chapterId = getRsc("$baseUrl${chapter.url}").extractNextJs<ChapterRefDto>()!!.capituloId
 
-        return client.newCall(GET("$baseUrl/api/chapters/$chapterId/view-pages", headers)).execute()
+        return client.get("$baseUrl/api/chapters/$chapterId/view-pages")
             .parseAs<PageList>()
             .pages
             .mapIndexed { index, imageUrl -> Page(index, imageUrl = imageUrl) }
     }
 
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
     // =====================Utils=====================
-
-    private fun metricsRequest(path: String, page: Int): Request = GET("$baseUrl/api/metrics/$path?limit=$PAGE_LIMIT&page=$page", headers)
 
     private fun SManga.slug(): String = url.substringBefore("?").substringAfterLast("/")
 
     private fun String.rscBust() = "$this?_rsc=${List(5) { BASE36.random() }.joinToString("")}"
 
-    private fun getRscHeaders(url: String) = headers.newBuilder()
-        .add("next-router-state-tree", NEXT_ROUTER)
-        .add("next-url", url.removePrefix(baseUrl))
-        .add("RSC", "1")
-        .build()
+    private suspend fun getRsc(url: String): Response {
+        val rscHeaders = headers.newBuilder()
+            .add("next-router-state-tree", NEXT_ROUTER)
+            .add("next-url", url.removePrefix(baseUrl))
+            .add("RSC", "1")
+            .build()
 
-    private fun rscRequest(url: String) = GET(url.substringBefore("?").rscBust(), getRscHeaders(url))
+        return client.get(url.substringBefore("?").rscBust(), rscHeaders)
+    }
 
     companion object {
         private const val PAGE_LIMIT = 20
-        private const val CHAPTER_LIMIT = 100
         private const val BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz"
         private const val NEXT_ROUTER = "%5B%22%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
     }
