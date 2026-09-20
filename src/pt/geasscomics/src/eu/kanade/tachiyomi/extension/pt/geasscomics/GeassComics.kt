@@ -10,7 +10,6 @@ import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.ConfigurableSource
-import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -32,19 +31,15 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import rx.Observable
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.TimeZone
 
 @Source
 abstract class GeassComics :
     HttpSource(),
     ConfigurableSource {
 
-    private val apiUrl = "https://api.skkyscan.fun"
+    private val apiUrl = "https://api.geasscomics.xyz"
 
     override val supportsLatest = true
 
@@ -65,6 +60,7 @@ abstract class GeassComics :
                 chain.proceed(newRequest)
             }
             .rateLimit(2)
+            .addInterceptor(GeassComicsDescrambler)
             .build()
     }
 
@@ -73,8 +69,8 @@ abstract class GeassComics :
         .add("Origin", baseUrl)
         .add("Accept", "application/json, text/plain, */*")
 
-    private var cachedGenres: List<GenreTagDto> = emptyList()
-    private var cachedTags: List<GenreTagDto> = emptyList()
+    private var cachedGenres: List<FilterOptionDto> = emptyList()
+    private var cachedTags: List<FilterOptionDto> = emptyList()
     private var fetchFiltersAttempts = 0
     private val scope = CoroutineScope(Dispatchers.IO)
 
@@ -128,42 +124,33 @@ abstract class GeassComics :
 
     // ============================= Popular ================================
 
+    // The ranking is capped at 50 entries and has no pagination.
     override fun popularMangaRequest(page: Int): Request {
-        val url = "$apiUrl/api/mangas/search".toHttpUrl().newBuilder().apply {
-            addQueryParameter("sort", "views")
-            addQueryParameter("order", "desc")
-            addQueryParameter("page", page.toString())
-            addQueryParameter("limit", PAGE_LIMIT.toString())
-            if (!showNsfwPref()) {
-                addQueryParameter("nsfw", "false")
-            }
-        }.build()
+        val url = "$apiUrl/api/ranking".toHttpUrl().newBuilder()
+            .addQueryParameter("period", "all")
+            .addQueryParameter("limit", "50")
+            .build()
         return GET(url, headers)
     }
 
-    override fun popularMangaParse(response: Response) = searchMangaParse(response)
+    override fun popularMangaParse(response: Response): MangasPage {
+        val works = response.parseAs<ApiResponse<List<RankingEntryDto>>>().data.map { it.work }
+        val mangas = works
+            .filter { showNsfwPref() || !it.isNsfw }
+            .map { it.toSManga() }
+        return MangasPage(mangas, false)
+    }
 
     // ============================= Latest =================================
 
-    override fun latestUpdatesRequest(page: Int): Request {
-        val url = "$apiUrl/api/mangas/search".toHttpUrl().newBuilder().apply {
-            addQueryParameter("sort", "updatedAt")
-            addQueryParameter("order", "desc")
-            addQueryParameter("page", page.toString())
-            addQueryParameter("limit", PAGE_LIMIT.toString())
-            if (!showNsfwPref()) {
-                addQueryParameter("nsfw", "false")
-            }
-        }.build()
-        return GET(url, headers)
-    }
+    override fun latestUpdatesRequest(page: Int): Request = searchMangaRequest(page, "", FilterList())
 
     override fun latestUpdatesParse(response: Response) = searchMangaParse(response)
 
     // ============================= Search =================================
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = "$apiUrl/api/mangas/search".toHttpUrl().newBuilder()
+        val url = "$apiUrl/api/works".toHttpUrl().newBuilder()
             .addQueryParameter("page", page.toString())
             .addQueryParameter("limit", PAGE_LIMIT.toString())
 
@@ -171,42 +158,29 @@ abstract class GeassComics :
             url.addQueryParameter("q", query)
         }
 
-        var showNsfw: Boolean? = null
+        if (!showNsfwPref()) {
+            url.addQueryParameter("safe", "true")
+        }
 
         filters.forEach { filter ->
             when (filter) {
-                is SortFilter -> {
-                    url.addQueryParameter("sort", filter.selected)
-                    url.addQueryParameter("order", filter.order)
+                is SortFilter -> filter.params.forEach { (key, value) ->
+                    url.addQueryParameter(key, value)
                 }
 
                 is StatusFilter -> {
                     filter.selected?.let { url.addQueryParameter("status", it) }
                 }
 
-                is NsfwFilter -> {
-                    showNsfw = when (filter.state) {
-                        Filter.TriState.STATE_INCLUDE -> true
-                        Filter.TriState.STATE_EXCLUDE -> false
-                        else -> null
-                    }
-                }
-
                 is GenreFilter -> {
-                    val selectedGenres = filter.state
-                        .filterIsInstance<GenreCheckBox>()
-                        .filter { it.state }
-                        .map { it.id }
+                    val selectedGenres = filter.state.filter { it.state }.map { it.id }
                     if (selectedGenres.isNotEmpty()) {
                         url.addQueryParameter("genres", selectedGenres.joinToString(","))
                     }
                 }
 
                 is TagFilter -> {
-                    val selectedTags = filter.state
-                        .filterIsInstance<TagCheckBox>()
-                        .filter { it.state }
-                        .map { it.id }
+                    val selectedTags = filter.state.filter { it.state }.map { it.id }
                     if (selectedTags.isNotEmpty()) {
                         url.addQueryParameter("tags", selectedTags.joinToString(","))
                     }
@@ -216,23 +190,12 @@ abstract class GeassComics :
             }
         }
 
-        // Never show nsfw content if is disabled in preferences
-        if (!showNsfwPref()) {
-            showNsfw = false
-        }
-
-        if (showNsfw !== null) {
-            url.addQueryParameter("nsfw", showNsfw.toString())
-        }
-
         return GET(url.build(), headers)
     }
 
     override fun searchMangaParse(response: Response): MangasPage {
-        val result = response.parseAs<ApiListResponse<MangaDto>>()
-        val mangas = result.data.map { it.toSManga(apiUrl) }
-        val hasNext = result.pagination?.hasNextPage() ?: false
-        return MangasPage(mangas, hasNext)
+        val result = response.parseAs<ApiResponse<WorkListDto>>().data
+        return MangasPage(result.items.map { it.toSManga() }, result.hasNextPage())
     }
 
     private fun fetchFilters() {
@@ -244,13 +207,13 @@ abstract class GeassComics :
             val genresRequest = GET("$apiUrl/api/genres", headers)
             val genresResponse = client.newCall(genresRequest).execute()
             if (genresResponse.isSuccessful) {
-                cachedGenres = genresResponse.parseAs<ApiResponse<List<GenreTagDto>>>().data
+                cachedGenres = genresResponse.parseAs<ApiResponse<List<FilterOptionDto>>>().data
             }
 
             val tagsRequest = GET("$apiUrl/api/tags", headers)
             val tagsResponse = client.newCall(tagsRequest).execute()
             if (tagsResponse.isSuccessful) {
-                cachedTags = tagsResponse.parseAs<ApiResponse<List<GenreTagDto>>>().data
+                cachedTags = tagsResponse.parseAs<ApiResponse<List<FilterOptionDto>>>().data
             }
         }
     }
@@ -259,63 +222,33 @@ abstract class GeassComics :
 
     override fun mangaDetailsRequest(manga: SManga): Request {
         val slug = manga.url.removePrefix("/manga/")
-        return GET("$apiUrl/api/mangas/$slug", headers)
+        return GET("$apiUrl/api/works/$slug", headers)
     }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val result = response.parseAs<ApiResponse<MangaDto>>()
-        return result.data.toSManga(apiUrl)
-    }
+    override fun mangaDetailsParse(response: Response): SManga = response.parseAs<ApiResponse<WorkDto>>().data.toSManga()
 
     // ============================= Chapters ===============================
 
-    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable.fromCallable {
-        val slug = manga.url.removePrefix("/manga/")
+    override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
 
-        val detailsRequest = GET("$apiUrl/api/mangas/$slug", headers)
-        val detailsResponse = client.newCall(detailsRequest).execute()
-        val mangaData = detailsResponse.parseAs<ApiResponse<MangaDto>>().data
-        val mangaId = mangaData.id
-
-        val allChapters = mutableListOf<ChapterDto>()
-        var currentPage = 1
-        var hasMore = true
-
-        while (hasMore) {
-            val chaptersUrl = "$apiUrl/api/chapters".toHttpUrl().newBuilder()
-                .addQueryParameter("mangaId", mangaId)
-                .addQueryParameter("page", currentPage.toString())
-                .addQueryParameter("limit", CHAPTERS_LIMIT.toString())
-                .addQueryParameter("order", "desc")
-                .build()
-
-            val chaptersRequest = GET(chaptersUrl, headers)
-            val chaptersResponse = client.newCall(chaptersRequest).execute()
-            val result = chaptersResponse.parseAs<ApiListResponse<ChapterDto>>()
-
-            allChapters.addAll(result.data)
-            hasMore = result.pagination?.hasNextPage() ?: false
-            currentPage++
-        }
-
-        allChapters.map { it.toSChapter(slug, dateFormat) }
+    override fun chapterListParse(response: Response): List<SChapter> {
+        val work = response.parseAs<ApiResponse<WorkDto>>().data
+        return work.chapters.map { it.toSChapter(work.slug) }
     }
-
-    override fun chapterListRequest(manga: SManga): Request = throw UnsupportedOperationException()
-
-    override fun chapterListParse(response: Response): List<SChapter> = throw UnsupportedOperationException()
 
     // ============================= Pages ==================================
 
+    // Served by the site itself rather than the API host.
     override fun pageListRequest(chapter: SChapter): Request {
-        val chapterId = "$baseUrl${chapter.url}".toHttpUrl().pathSegments[1]
-        return GET("$apiUrl/api/chapters/$chapterId", headers)
+        val segments = "$baseUrl${chapter.url}".toHttpUrl().pathSegments
+        return GET("$baseUrl/api/read/${segments[2]}/${segments[3]}", headers)
     }
 
     override fun pageListParse(response: Response): List<Page> {
-        val result = response.parseAs<ApiResponse<ChapterPagesDto>>()
-        return result.data.pages.sortedBy { it.pageNumber }.mapIndexed { index, page ->
-            Page(index, imageUrl = "$apiUrl${page.imageUrl}")
+        val result = response.parseAs<ReadDto>()
+        return result.pages.mapIndexed { index, url ->
+            val scramble = result.pageScrambles.getOrNull(index)
+            Page(index, imageUrl = if (scramble.isNullOrEmpty()) url else "$url#$scramble")
         }
     }
 
@@ -333,14 +266,12 @@ abstract class GeassComics :
 
     override fun getMangaUrl(manga: SManga): String {
         val slug = manga.url.removePrefix("/manga/")
-        return "$baseUrl/obra/$slug"
+        return "$baseUrl/work/$slug"
     }
 
     override fun getChapterUrl(chapter: SChapter): String {
         val pathSegments = "$baseUrl${chapter.url}".toHttpUrl().pathSegments
-        val mangaSlug = pathSegments.getOrElse(2) { "" }
-        val chapterNumber = pathSegments.getOrElse(3) { "" }
-        return "$baseUrl/ler/$mangaSlug/$chapterNumber"
+        return "$baseUrl/read/${pathSegments[2]}/${pathSegments[3]}"
     }
 
     // ============================= Filters ================================
@@ -351,11 +282,10 @@ abstract class GeassComics :
         val showNsfw = showNsfwPref()
 
         val filteredGenres = (if (showNsfw) cachedGenres else cachedGenres.filter { !it.isNsfw })
-            .map { it.name to it.id }
-        val filteredTags = (if (showNsfw) cachedTags else cachedTags.filter { !it.isNsfw })
-            .map { it.name to it.id }
+            .map { it.label to it.slug }
+        val filteredTags = cachedTags.map { it.label to it.slug }
 
-        return getFilters(filteredGenres, filteredTags, showNsfw)
+        return getFilters(filteredGenres, filteredTags)
     }
 
     // ============================= Preferences ============================
@@ -411,17 +341,10 @@ abstract class GeassComics :
 
     companion object {
         private const val PAGE_LIMIT = 24
-        private const val CHAPTERS_LIMIT = 100
         private const val PREF_EMAIL = "pref_email"
         private const val PREF_PASSWORD = "pref_password"
         private const val PREF_TOKEN = "pref_token"
         private const val PREF_ADULT_KEY = "pref_adult_content"
         private val JSON_MEDIA_TYPE = "application/json".toMediaType()
-
-        private val dateFormat by lazy {
-            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).apply {
-                timeZone = TimeZone.getTimeZone("UTC")
-            }
-        }
     }
 }

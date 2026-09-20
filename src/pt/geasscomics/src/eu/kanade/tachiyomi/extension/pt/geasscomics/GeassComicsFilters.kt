@@ -6,15 +6,10 @@ import eu.kanade.tachiyomi.source.model.FilterList
 fun getFilters(
     genres: List<Pair<String, String>> = emptyList(),
     tags: List<Pair<String, String>> = emptyList(),
-    showNsfw: Boolean = false,
 ): FilterList = FilterList(
     listOf(
         SortFilter(),
         StatusFilter(),
-    ) + when {
-        !showNsfw -> listOf(Filter.Header("Não Mostrar conteúdo +18"))
-        else -> listOf(NsfwFilter())
-    } + listOf(
         Filter.Separator(),
     ) + when {
         genres.isEmpty() && tags.isEmpty() -> listOf(Filter.Header("Clique em 'Redefinir' para carregar os filtros"))
@@ -32,23 +27,14 @@ class SortFilter :
         "Ordenar por",
         SORT_OPTIONS.map { it.first }.toTypedArray(),
     ) {
-    val selected: String get() = SORT_OPTIONS[state].second
-
-    val order: String
-        get() = when (state) {
-            3 -> "asc"
-
-            // Title A-Z
-            else -> "desc"
-        }
+    val params: Map<String, String> get() = SORT_OPTIONS[state].second
 
     companion object {
-        private val SORT_OPTIONS = listOf(
-            "Mais Recentes" to "updatedAt",
-            "Mais Vistos" to "views",
-            "Melhor Avaliados" to "rating",
-            "Título (A-Z)" to "title",
-            "Qtd. de Capítulos" to "chapterCount",
+        // The API silently ignores any other sortBy value and falls back to most recently updated.
+        private val SORT_OPTIONS = listOf<Pair<String, Map<String, String>>>(
+            "Mais Recentes" to emptyMap(),
+            "Melhor Avaliados" to mapOf("sortBy" to "rating"),
+            "Título (A-Z)" to mapOf("sortBy" to "title", "sortDir" to "asc"),
         )
     }
 }
@@ -70,8 +56,6 @@ class StatusFilter :
         )
     }
 }
-
-class NsfwFilter : Filter.TriState("Mostrar conteúdo +18", TriState.STATE_IGNORE)
 
 class GenreFilter(genres: List<Pair<String, String>>) :
     Filter.Group<GenreCheckBox>(
