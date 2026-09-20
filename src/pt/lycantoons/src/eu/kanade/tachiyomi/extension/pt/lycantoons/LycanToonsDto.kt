@@ -88,8 +88,13 @@ class ChapterDto(
 }
 
 @Serializable
+class ChapterRefDto(
+    val capituloId: Int,
+)
+
+@Serializable
 class PageList(
-    val imageUrls: List<String>,
+    val pages: List<String>,
 )
 
 @Serializable

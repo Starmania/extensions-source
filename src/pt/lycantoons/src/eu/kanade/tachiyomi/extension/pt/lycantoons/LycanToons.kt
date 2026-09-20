@@ -98,11 +98,15 @@ abstract class LycanToons : HttpSource() {
 
     override fun pageListRequest(chapter: SChapter): Request = rscRequest("$baseUrl${chapter.url}")
 
+    // The chapter page no longer embeds its images (`initialPages` is null); the reader loads them
+    // from this API using the chapter id found in the page.
     override fun pageListParse(response: Response): List<Page> {
-        val dto = response.extractNextJs<PageList>()
+        val chapterId = response.extractNextJs<ChapterRefDto>()!!.capituloId
 
-        return dto?.imageUrls?.mapIndexed { index, imageUrl -> Page(index, imageUrl = imageUrl) }
-            ?: emptyList()
+        return client.newCall(GET("$baseUrl/api/chapters/$chapterId/view-pages", headers)).execute()
+            .parseAs<PageList>()
+            .pages
+            .mapIndexed { index, imageUrl -> Page(index, imageUrl = imageUrl) }
     }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
