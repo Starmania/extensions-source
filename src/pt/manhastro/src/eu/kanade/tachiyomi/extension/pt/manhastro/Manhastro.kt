@@ -2,72 +2,61 @@ package eu.kanade.tachiyomi.extension.pt.manhastro
 
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.tryParse
+import keiyoushi.utils.tryParseDateTime
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.brotli.BrotliInterceptor
-import java.text.SimpleDateFormat
-import java.util.Locale
+import java.time.format.DateTimeFormatter
 import kotlin.time.Duration.Companion.seconds
 
 @Source
 abstract class Manhastro :
-    HttpSource(),
+    KeiSource(),
     ConfigurableSource {
 
     private val apiUrl = "https://api2.manhastro.net"
 
-    override val supportsLatest = true
-
     private val preferences by getPreferencesLazy()
 
-    override val client: OkHttpClient = network.client.newBuilder()
-        .connectTimeout(30.seconds)
+    override fun OkHttpClient.Builder.configureClient() = connectTimeout(30.seconds)
         .readTimeout(30.seconds)
-        .apply {
-            val index = networkInterceptors().indexOfFirst { it is BrotliInterceptor }
-            if (index >= 0) interceptors().add(networkInterceptors().removeAt(index))
-        }
         .rateLimit(2)
-        .build()
 
     // ============================== Popular ==============================
 
-    override fun popularMangaRequest(page: Int) = GET("$apiUrl/rank/diario", headers)
-
-    override fun popularMangaParse(response: Response): MangasPage {
-        val result = response.parseAs<ApiResponse<List<MangaDto>>>(transform = ::cleanJsonResponse)
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val result = client.get("$apiUrl/rank/diario").parseAs<ApiResponse<List<MangaDto>>>(transform = ::cleanJsonResponse)
 
         return MangasPage(result.data.map { it.toSManga() }, false)
     }
 
     // ============================== Latest ==============================
 
-    override fun latestUpdatesRequest(page: Int) = GET("$apiUrl/lancamentos", headers)
-
-    override fun latestUpdatesParse(response: Response): MangasPage {
-        val result = response.parseAs<ApiResponse<List<MangaDto>>>(transform = ::cleanJsonResponse)
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        val result = client.get("$apiUrl/lancamentos").parseAs<ApiResponse<List<MangaDto>>>(transform = ::cleanJsonResponse)
 
         return MangasPage(result.data.distinctBy { it.mangaId }.map { it.toSManga() }, false)
     }
 
     // ============================== Search ==============================
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val url = "$apiUrl/dados".toHttpUrl().newBuilder()
             .addQueryParameter("page", page.toString())
             .addQueryParameter("limit", "100")
@@ -90,40 +79,52 @@ abstract class Manhastro :
         url.addQueryParameter("sort", sort.key)
         url.addQueryParameter("order", sort.order)
 
-        return GET(url.build(), headers)
-    }
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        val result = response.parseAs<CatalogResponse>(transform = ::cleanJsonResponse)
+        val result = client.get(url.build()).parseAs<CatalogResponse>(transform = ::cleanJsonResponse)
 
         return MangasPage(result.data.map { it.toSManga() }, result.meta.hasMore)
     }
 
-    override fun getFilterList() = getFilters()
+    override fun getFilterList(data: JsonElement?) = getFilters()
 
-    // ============================== Details ==============================
+    // ============================== URL search ==============================
 
-    override fun mangaDetailsRequest(manga: SManga) = GET("$apiUrl/dados?manga_id=${manga.url.substringAfterLast("/")}", headers)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.pathSegments.getOrNull(0) != "manga") return null
+        val mangaId = url.pathSegments.getOrNull(1)?.toIntOrNull() ?: return null
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val result = response.parseAs<ApiResponse<List<MangaDto>>>(transform = ::cleanJsonResponse)
+        return getMangaDetails(mangaId)
+    }
+
+    // ============================== Details + Chapters ==============================
+
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate = coroutineScope {
+        val mangaId = manga.url.substringAfterLast("/")
+        val detailsDeferred = async { if (fetchDetails) getMangaDetails(mangaId.toInt()) else manga }
+        val chaptersDeferred = async { if (fetchChapters) getChapterList(mangaId) else chapters }
+
+        SMangaUpdate(detailsDeferred.await(), chaptersDeferred.await())
+    }
+
+    private suspend fun getMangaDetails(mangaId: Int): SManga {
+        val result = client.get("$apiUrl/dados?manga_id=$mangaId").parseAs<ApiResponse<List<MangaDto>>>(transform = ::cleanJsonResponse)
 
         return result.data.firstOrNull()?.toSManga() ?: throw Exception("Manga not found")
     }
 
-    // ============================== Chapters ==============================
-
-    override fun chapterListRequest(manga: SManga) = GET("$apiUrl/dados/${manga.url.substringAfterLast("/")}", headers)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val result = response.parseAs<ApiResponse<List<ChapterDto>>>(transform = ::cleanJsonResponse)
+    private suspend fun getChapterList(mangaId: String): List<SChapter> {
+        val result = client.get("$apiUrl/dados/$mangaId").parseAs<ApiResponse<List<ChapterDto>>>(transform = ::cleanJsonResponse)
 
         return result.data.map { chapter ->
             SChapter.create().apply {
                 url = "/capitulo/${chapter.capituloId}"
                 name = chapter.capituloNome
                 chapter_number = extractChapterNumber(chapter.capituloNome)
-                date_upload = DATE_FORMAT.tryParse(chapter.capituloData)
+                date_upload = DATE_FORMAT.tryParseDateTime(chapter.capituloData)
             }
         }.sortedByDescending { it.chapter_number }
     }
@@ -136,29 +137,13 @@ abstract class Manhastro :
 
     // ============================== Pages ==============================
 
-    override fun pageListRequest(chapter: SChapter) = GET("$apiUrl/paginas/${chapter.url.substringAfterLast("/")}", headers)
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val result = client.get("$apiUrl/paginas/${chapter.url.substringAfterLast("/")}").parseAs<PagesResponse>(transform = ::cleanJsonResponse)
+        val chapterData = result.data.chapter ?: return emptyList()
 
-    override fun pageListParse(response: Response): List<Page> {
-        val result = response.parseAs<PagesResponse>(transform = ::cleanJsonResponse)
-        val chapter = result.data.chapter ?: return emptyList()
-
-        return chapter.data.mapIndexed { i, filename ->
-            Page(i, imageUrl = "${chapter.baseUrl}/${chapter.hash}/$filename")
+        return chapterData.data.mapIndexed { i, filename ->
+            Page(i, imageUrl = "${chapterData.baseUrl}/${chapterData.hash}/$filename")
         }
-    }
-
-    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
-
-    // ============================== URLs ==============================
-
-    override fun getMangaUrl(manga: SManga): String {
-        val mangaId = manga.url.substringAfterLast("/")
-        return "$baseUrl/manga/$mangaId"
-    }
-
-    override fun getChapterUrl(chapter: SChapter): String {
-        val chapterId = chapter.url.substringAfterLast("/")
-        return "$baseUrl/capitulo/$chapterId"
     }
 
     // ============================== Helpers ==============================
@@ -196,7 +181,7 @@ abstract class Manhastro :
     }
 
     companion object {
-        private val DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT)
+        private val DATE_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
         private const val ENGLISH_TITLE_PREF = "englishTitlePref"
     }
 }
