@@ -18,25 +18,23 @@ data class MangaDto(
     @SerialName("descricao_brasil") private val descricaoBrasil: String? = null,
     private val imagem: String? = null,
     val generos: List<String> = emptyList(),
-    @SerialName("views_mes") private val viewsMes: String? = null,
-    @SerialName("qnt_capitulo") val qntCapitulo: Int? = null,
 ) {
     val displayTitle: String get() = tituloBrasil?.takeIf { it.isNotBlank() } ?: titulo
     val displayDescription: String? get() = descricaoBrasil?.takeIf { it.isNotBlank() } ?: descricao
     val thumbnailUrl: String? get() = imagem?.let {
         if (it.startsWith("http")) it else "https://$it"
     }
-    val popularity: Int get() = viewsMes?.toIntOrNull() ?: 0
 }
 
 @Serializable
-data class RankingItemDto(
-    @SerialName("manga_id") val mangaId: Int,
+data class CatalogResponse(
+    val data: List<MangaDto>,
+    val meta: CatalogMeta,
 )
 
 @Serializable
-data class LatestItemDto(
-    @SerialName("manga_id") val mangaId: Int,
+data class CatalogMeta(
+    @SerialName("has_more") val hasMore: Boolean,
 )
 
 @Serializable

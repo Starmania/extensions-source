@@ -13,6 +13,8 @@ fun getFilters() = FilterList(
     GenreFilter(getGenreList()),
 )
 
+class SortOption(val key: String, val order: String)
+
 class SortFilter :
     Filter.Select<String>(
         "Ordenar por",
@@ -22,10 +24,10 @@ class SortFilter :
 
     companion object {
         private val SORT_OPTIONS = listOf(
-            "Mais Popular" to "popular",
-            "Mais Recente" to "recent",
-            "Título (A-Z)" to "alphabetical",
-            "Mais Capítulos" to "chapters",
+            "Mais Popular" to SortOption("views", "desc"),
+            "Mais Recente" to SortOption("ultimo_capitulo", "desc"),
+            "Título (A-Z)" to SortOption("titulo", "asc"),
+            "Mais Capítulos" to SortOption("capitulos", "desc"),
         )
     }
 }

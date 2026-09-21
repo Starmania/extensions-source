@@ -1,6 +1,5 @@
 package eu.kanade.tachiyomi.extension.pt.manhastro
 
-import android.app.Application
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
@@ -16,17 +15,13 @@ import keiyoushi.network.rateLimit
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
-import okhttp3.Cache
-import okhttp3.CacheControl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.Response
 import okhttp3.brotli.BrotliInterceptor
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
-import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
 @Source
@@ -50,34 +45,14 @@ abstract class Manhastro :
         .rateLimit(2)
         .build()
 
-    private val dataClient = client.newBuilder()
-        .cache(
-            Cache(
-                directory = File(Injekt.get<Application>().externalCacheDir, "network_cache_${name.lowercase()}"),
-                maxSize = 20L * 1024 * 1024, // 20 MiB
-            ),
-        )
-        .addNetworkInterceptor { chain ->
-            chain.proceed(chain.request()).newBuilder()
-                .removeHeader("Cache-Control")
-                .removeHeader("Expires")
-                .removeHeader("Pragma")
-                .build()
-        }
-        .build()
-
     // ============================== Popular ==============================
 
     override fun popularMangaRequest(page: Int) = GET("$apiUrl/rank/diario", headers)
 
     override fun popularMangaParse(response: Response): MangasPage {
-        val result = response.parseAs<ApiResponse<List<RankingItemDto>>>(transform = ::cleanJsonResponse)
-        val mangaIds = result.data.map { it.mangaId }
-        val mangaMap = fetchMangasByIds(mangaIds)
+        val result = response.parseAs<ApiResponse<List<MangaDto>>>(transform = ::cleanJsonResponse)
 
-        val mangas = result.data.mapNotNull { mangaMap[it.mangaId]?.toSManga() }
-
-        return MangasPage(mangas, false)
+        return MangasPage(result.data.map { it.toSManga() }, false)
     }
 
     // ============================== Latest ==============================
@@ -85,88 +60,56 @@ abstract class Manhastro :
     override fun latestUpdatesRequest(page: Int) = GET("$apiUrl/lancamentos", headers)
 
     override fun latestUpdatesParse(response: Response): MangasPage {
-        val result = response.parseAs<ApiResponse<List<LatestItemDto>>>(transform = ::cleanJsonResponse)
-        val mangaIds = result.data.map { it.mangaId }.distinct()
-        val mangaMap = fetchMangasByIds(mangaIds)
+        val result = response.parseAs<ApiResponse<List<MangaDto>>>(transform = ::cleanJsonResponse)
 
-        val mangas = mangaIds.mapNotNull { mangaMap[it]?.toSManga() }
-
-        return MangasPage(mangas, false)
+        return MangasPage(result.data.distinctBy { it.mangaId }.map { it.toSManga() }, false)
     }
 
     // ============================== Search ==============================
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList) = throw UnsupportedOperationException()
-
-    override fun searchMangaParse(response: Response) = throw UnsupportedOperationException()
-
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList) = rx.Observable.fromCallable {
-        var mangas = fetchAllMangas()
+    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+        val url = "$apiUrl/dados".toHttpUrl().newBuilder()
+            .addQueryParameter("page", page.toString())
+            .addQueryParameter("limit", "100")
 
         if (query.isNotBlank()) {
-            val q = query.lowercase().normalize()
-            mangas = mangas.filter { manga ->
-                val titulo = manga.titulo.lowercase().normalize()
-                val tituloBrasil = manga.tituloBrasil?.lowercase()?.normalize() ?: ""
-                titulo.contains(q) || tituloBrasil.contains(q)
-            }
+            url.addQueryParameter("nome", query.trim())
         }
 
-        val typeFilter = filters.filterIsInstance<TypeFilter>().firstOrNull()
-        val genreFilter = filters.filterIsInstance<GenreFilter>().firstOrNull()
-        val sortFilter = filters.filterIsInstance<SortFilter>().firstOrNull()
+        filters.filterIsInstance<TypeFilter>().firstOrNull()?.state
+            ?.filter { it.state }
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { url.addQueryParameter("categoria", it.joinToString(",") { type -> type.value }) }
 
-        val selectedTypes = typeFilter?.state?.filter { it.state }?.map { it.value } ?: emptyList()
-        if (selectedTypes.isNotEmpty()) {
-            mangas = mangas.filter { manga ->
-                selectedTypes.any { type ->
-                    manga.generos.any { it.equals(type, ignoreCase = true) }
-                }
-            }
-        }
+        filters.filterIsInstance<GenreFilter>().firstOrNull()?.state
+            ?.filter { it.state }
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { url.addQueryParameter("genero", it.joinToString(",") { genre -> genre.value }) }
 
-        val selectedGenres = genreFilter?.state?.filter { it.state }?.map { it.value } ?: emptyList()
-        if (selectedGenres.isNotEmpty()) {
-            mangas = mangas.filter { manga ->
-                selectedGenres.all { genre ->
-                    manga.generos.any { it.equals(genre, ignoreCase = true) }
-                }
-            }
-        }
+        val sort = filters.filterIsInstance<SortFilter>().firstOrNull()?.selected ?: SortFilter().selected
+        url.addQueryParameter("sort", sort.key)
+        url.addQueryParameter("order", sort.order)
 
-        val sortOption = sortFilter?.selected ?: "popular"
-        mangas = when (sortOption) {
-            "popular" -> mangas.sortedByDescending { it.popularity }
-            "recent" -> mangas.sortedByDescending { it.mangaId }
-            "alphabetical" -> mangas.sortedBy { it.displayTitle.lowercase() }
-            "chapters" -> mangas.sortedByDescending { it.qntCapitulo ?: 0 }
-            else -> mangas
-        }
+        return GET(url.build(), headers)
+    }
 
-        val start = (page - 1) * PER_PAGE
-        val end = minOf(start + PER_PAGE, mangas.size)
+    override fun searchMangaParse(response: Response): MangasPage {
+        val result = response.parseAs<CatalogResponse>(transform = ::cleanJsonResponse)
 
-        val sliced = mangas.subList(start, end)
-        MangasPage(sliced.map { it.toSManga() }, end < mangas.size)
-    }!!
-
-    private fun String.normalize(): String = java.text.Normalizer.normalize(this, java.text.Normalizer.Form.NFD)
-        .replace(Regex("[\\p{InCombiningDiacriticalMarks}]"), "")
+        return MangasPage(result.data.map { it.toSManga() }, result.meta.hasMore)
+    }
 
     override fun getFilterList() = getFilters()
 
     // ============================== Details ==============================
 
-    override fun mangaDetailsRequest(manga: SManga) = throw UnsupportedOperationException()
+    override fun mangaDetailsRequest(manga: SManga) = GET("$apiUrl/dados?manga_id=${manga.url.substringAfterLast("/")}", headers)
 
-    override fun mangaDetailsParse(response: Response) = throw UnsupportedOperationException()
+    override fun mangaDetailsParse(response: Response): SManga {
+        val result = response.parseAs<ApiResponse<List<MangaDto>>>(transform = ::cleanJsonResponse)
 
-    override fun fetchMangaDetails(manga: SManga) = rx.Observable.fromCallable {
-        val mangaId = manga.url.substringAfterLast("/").toInt()
-        val allMangas = fetchAllMangas()
-        allMangas.find { it.mangaId == mangaId }?.toSManga()
-            ?: throw Exception("Manga not found")
-    }!!
+        return result.data.firstOrNull()?.toSManga() ?: throw Exception("Manga not found")
+    }
 
     // ============================== Chapters ==============================
 
@@ -226,21 +169,6 @@ abstract class Manhastro :
         .removePrefix("_")
         .trim()
 
-    private fun fetchAllMangas(): List<MangaDto> {
-        val request = GET(
-            "$apiUrl/dados",
-            headers,
-            CacheControl.Builder().maxStale(30.minutes).build(),
-        )
-        val response = dataClient.newCall(request).execute()
-        return response.parseAs<ApiResponse<List<MangaDto>>>(transform = ::cleanJsonResponse).data
-    }
-
-    private fun fetchMangasByIds(ids: List<Int>): Map<Int, MangaDto> {
-        val allMangas = fetchAllMangas()
-        return allMangas.filter { it.mangaId in ids }.associateBy { it.mangaId }
-    }
-
     private fun MangaDto.toSManga() = SManga.create().apply {
         url = "/manga/$mangaId"
         title = if (useEnglishTitle) {
@@ -270,6 +198,5 @@ abstract class Manhastro :
     companion object {
         private val DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT)
         private const val ENGLISH_TITLE_PREF = "englishTitlePref"
-        private const val PER_PAGE = 30
     }
 }
