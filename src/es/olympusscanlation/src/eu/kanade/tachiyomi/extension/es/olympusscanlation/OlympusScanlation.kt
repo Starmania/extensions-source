@@ -223,6 +223,11 @@ abstract class OlympusScanlation :
         return data.data.map { it.toSChapter(mangaId, dateFormat) }
     }
 
+    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
+        fetchSeriesList()
+        return super.fetchPageList(chapter)
+    }
+
     override fun pageListRequest(chapter: SChapter): Request {
         val mangaId = chapter.url.substringBefore("/")
         val chapterId = chapter.url.substringAfter("/")
