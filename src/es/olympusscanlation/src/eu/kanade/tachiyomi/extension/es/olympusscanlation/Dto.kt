@@ -97,11 +97,11 @@ class LatestMangaDto(
 
 @Serializable
 class MangaDetailDto(
-    var data: MangaDto,
+    val data: MangaDto,
 )
 
 @Serializable
-class PayloadChapterDto(var data: List<ChapterDto>, val meta: MetaDto)
+class PayloadChapterDto(val data: List<ChapterDto>, val meta: MetaDto)
 
 @Serializable
 class ChapterDto(
