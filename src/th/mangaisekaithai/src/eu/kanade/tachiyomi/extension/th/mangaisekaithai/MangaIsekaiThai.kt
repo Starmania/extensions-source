@@ -34,7 +34,7 @@ abstract class MangaIsekaiThai : Madara() {
 
     // Descrambling logic from ManhuaKey
     override val client = super.client.newBuilder()
-        .addNetworkInterceptor(::imageDescrambler)
+        .addInterceptor(::imageDescrambler)
         .build()
 
     override val pageListParseSelector = ".reading-content img, .reading-content div.displayImage + script:containsData(p,a,c,k,e,d)"
