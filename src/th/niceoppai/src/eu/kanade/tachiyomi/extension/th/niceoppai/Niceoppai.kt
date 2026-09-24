@@ -8,12 +8,16 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.annotation.Source
+import keiyoushi.lib.unpacker.Unpacker
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstanceOrNull
+import keiyoushi.utils.parseAs
+import keiyoushi.utils.toJsonString
 import keiyoushi.utils.tryParse
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.nodes.Document
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
@@ -27,22 +31,22 @@ abstract class Niceoppai : HttpSource() {
         .connectTimeout(1.minutes)
         .readTimeout(1.minutes)
         .writeTimeout(1.minutes)
+        .addInterceptor(ImageInterceptor())
         .build()
 
     override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/manga_list/all/any/most-popular-monthly/$page", headers)
 
     override fun popularMangaParse(response: Response): MangasPage {
         val document = response.asJsoup()
-        val mangas = document.select("div.nde").mapNotNull { element ->
+        val mangas = document.select("div.feed div.fcard").map { element ->
             SManga.create().apply {
-                title = element.selectFirst("div.det a")?.text() ?: return@mapNotNull null
-                element.selectFirst("div.cvr a")?.let {
-                    setUrlWithoutDomain(it.attr("abs:href"))
-                }
-                thumbnail_url = element.selectFirst("div.cvr img")?.attr("abs:src")
+                val link = element.selectFirst("a.fcard__title")!!
+                title = link.text()
+                setUrlWithoutDomain(link.attr("abs:href"))
+                thumbnail_url = element.selectFirst("img.cover__img")?.attr("abs:src")
             }
         }
-        val hasNextPage = document.select("ul.pgg li a").last()?.text() == "Next"
+        val hasNextPage = document.selectFirst("ul.pgg a:containsOwn(Next)") != null
         return MangasPage(mangas, hasNextPage)
     }
 
@@ -72,75 +76,56 @@ abstract class Niceoppai : HttpSource() {
 
     override fun mangaDetailsParse(response: Response): SManga {
         val document = response.asJsoup()
-        val infoElement = document.selectFirst("div.det") ?: return SManga.create()
-        val titleElement = document.selectFirst("h1.ttl") ?: return SManga.create()
+        val info = document.selectFirst("div.series__info")!!
+        val facts = info.select("div.fact").associate { it.selectFirst("span")!!.text() to it.selectFirst("b")!! }
 
         return SManga.create().apply {
-            title = titleElement.text()
-            author = infoElement.select("p").getOrNull(2)?.selectFirst("a")?.text()
+            title = info.selectFirst("h1")!!.text()
+            author = facts["ผู้แต่ง"]?.text()
             artist = author
-            status = infoElement.select("p").getOrNull(9)?.ownText()?.replace(": ", " ")?.let { getStatus(it) } ?: SManga.UNKNOWN
-            genre = infoElement.select("p").getOrNull(5)?.select("a")?.joinToString { it.text() }
-            description = infoElement.select("p").firstOrNull()?.ownText()?.replace(": ", " ")
-            thumbnail_url = document.selectFirst("div.mng_ifo div.cvr_ara img")?.attr("abs:src")
-            initialized = true
+            status = facts["สถานะ"]?.text()?.let { getStatus(it) } ?: SManga.UNKNOWN
+            genre = info.select("a.chip--genre").joinToString { it.text() }
+            description = info.selectFirst("p.series__syn")?.text()
+            thumbnail_url = document.selectFirst("div.series__cover img.cover__img")?.attr("abs:src")
         }
     }
 
+    // The first page of the chapter list is the manga page itself; the rest are at /chapter-list/<n>/
     override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
-        val pageUrls = document.select("ul.pgg li a")
-            .filter { it.text() != "Next" && it.text() != "Last" }
-            .map { it.attr("abs:href") }
-            .distinct()
-
-        val chList = mutableListOf<SChapter>()
-        if (pageUrls.isNotEmpty()) {
-            pageUrls.forEach { urlPage ->
-                client.newCall(GET(urlPage, headers)).execute().use { res ->
-                    chList += parseChaptersFromDocument(res.asJsoup(), chList.size)
-                }
-            }
-        } else {
-            chList += parseChaptersFromDocument(document)
+        var document = response.asJsoup()
+        val chapters = parseChapters(document).toMutableList()
+        while (true) {
+            val next = document.selectFirst("ul.pgg a:containsOwn(Next)")?.attr("abs:href") ?: break
+            document = client.newCall(GET(next, headers)).execute().asJsoup()
+            chapters += parseChapters(document)
         }
-        return chList
+        return chapters
     }
 
-    private fun parseChaptersFromDocument(document: org.jsoup.nodes.Document, startIdx: Int = 0): List<SChapter> {
-        val elements = document.select("ul.lst li.lng_")
-        if (elements.isEmpty()) {
-            return listOf(
-                SChapter.create().apply {
-                    name = "Chapter 1"
-                    chapter_number = 1.0f
-                },
-            )
-        }
-        return elements.mapIndexed { idx, chapter ->
-            val parsedChapter = SChapter.create()
-            val btn = chapter.selectFirst("a.lst")
-            btn?.let {
-                parsedChapter.setUrlWithoutDomain(it.attr("abs:href"))
-                parsedChapter.name = it.selectFirst("b.val")?.text() ?: ""
-                parsedChapter.date_upload = parseChapterDate(it.selectFirst("b.dte")?.text())
-            }
-
-            if (parsedChapter.name.isEmpty()) {
-                parsedChapter.chapter_number = 0.0f
-            } else {
-                val wordsChapter = parsedChapter.name.replace("ตอนที่. ", "").split(" - ")
-                parsedChapter.chapter_number = wordsChapter.firstOrNull()?.toFloatOrNull() ?: (startIdx + idx + 1).toFloat()
-            }
-            parsedChapter
+    private fun parseChapters(document: Document): List<SChapter> = document.select("a.chrow").map { row ->
+        SChapter.create().apply {
+            setUrlWithoutDomain(row.attr("abs:href"))
+            val number = row.selectFirst("div.chrow__n")!!.text().removePrefix("#")
+            val subtitle = row.selectFirst("div.chrow__t")?.text().orEmpty()
+            name = if (subtitle.isEmpty()) "ตอนที่ $number" else "ตอนที่ $number - $subtitle"
+            chapter_number = number.toFloatOrNull() ?: -1f
+            date_upload = parseChapterDate(row.selectFirst("div.chrow__d")?.text())
         }
     }
 
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
-        return document.select("#image-container > center > img").mapIndexed { i, img ->
-            Page(i, imageUrl = if (img.hasAttr("data-src")) img.attr("abs:data-src") else img.attr("abs:src"))
+        // Scrambled pages are an empty div followed by a packed script handing the tile map to the reader
+        val images = document.select("#image-container img, #image-container div[id] + script").map { element ->
+            if (element.tagName() == "img") {
+                return@map if (element.hasAttr("data-src")) element.attr("abs:data-src") else element.attr("abs:src")
+            }
+            val data = Unpacker.unpack(element.data()).replace("\\", "")
+                .substringAfter(",").substringBeforeLast(")")
+                .parseAs<ScrambledImage>()
+            "${data.u}#${data.toJsonString()}"
         }
+        return images.mapIndexed { i, url -> Page(i, imageUrl = url) }
     }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()

@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Niceoppai"
-    versionCode = 29
+    versionCode = 30
     contentWarning = ContentWarning.MIXED
     libVersion = "1.4"
 
@@ -14,4 +14,8 @@ keiyoushi {
         lang = "th"
         baseUrl = "https://www.niceoppai.net"
     }
+}
+
+dependencies {
+    implementation(project(":lib:unpacker"))
 }
