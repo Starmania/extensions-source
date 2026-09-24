@@ -1,43 +1,62 @@
 package eu.kanade.tachiyomi.extension.th.niceoppai
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.lib.unpacker.Unpacker
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
-import keiyoushi.utils.tryParse
+import keiyoushi.utils.tryParseDate
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
 import org.jsoup.nodes.Document
-import java.text.SimpleDateFormat
+import java.time.format.DateTimeFormatter
 import java.util.Calendar
 import java.util.Locale
 import kotlin.time.Duration.Companion.minutes
 
 @Source
-abstract class Niceoppai : HttpSource() {
-    override val supportsLatest: Boolean = true
+abstract class Niceoppai : KeiSource() {
 
-    override val client: OkHttpClient = network.client.newBuilder()
-        .connectTimeout(1.minutes)
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = connectTimeout(1.minutes)
         .readTimeout(1.minutes)
         .writeTimeout(1.minutes)
         .addInterceptor(ImageInterceptor())
-        .build()
 
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/manga_list/all/any/most-popular-monthly/$page", headers)
+    override suspend fun getPopularManga(page: Int): MangasPage = getMangaList("$baseUrl/manga_list/all/any/most-popular-monthly/$page")
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    override suspend fun getLatestUpdates(page: Int): MangasPage = getMangaList("$baseUrl/manga_list/all/any/last-updated/$page")
+
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val orderByFilter = filters.firstInstanceOrNull<OrderByFilter>()
+        val orderByState = orderByFilter?.state ?: 0
+        val orderByString = ORDER_BY_FILTER_OPTIONS_VALUES[orderByState]
+
+        return if (orderByState != 0) {
+            getMangaList("$baseUrl/manga_list/all/any/$orderByString/$page")
+        } else {
+            getMangaList("$baseUrl/manga_list/search/$query/$orderByString/$page")
+        }
+    }
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (!url.host.endsWith("niceoppai.net")) return null
+        val slug = url.pathSegments.first().takeIf { it.isNotEmpty() && it != "manga_list" } ?: return null
+        val manga = SManga.create().apply { this.url = "/$slug/" }
+        return parseMangaDetails(client.get(getMangaUrl(manga)).asJsoup()).apply { this.url = manga.url }
+    }
+
+    private suspend fun getMangaList(url: String): MangasPage {
+        val document = client.get(url).asJsoup()
         val mangas = document.select("div.feed div.fcard").map { element ->
             SManga.create().apply {
                 val link = element.selectFirst("a.fcard__title")!!
@@ -50,32 +69,23 @@ abstract class Niceoppai : HttpSource() {
         return MangasPage(mangas, hasNextPage)
     }
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/manga_list/all/any/last-updated/$page", headers)
-
-    override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val orderByFilter = filters.firstInstanceOrNull<OrderByFilter>()
-        val orderByState = orderByFilter?.state ?: 0
-        val orderByString = ORDER_BY_FILTER_OPTIONS_VALUES[orderByState]
-
-        return if (orderByState != 0) {
-            GET("$baseUrl/manga_list/all/any/$orderByString/$page", headers)
-        } else {
-            GET("$baseUrl/manga_list/search/$query/$orderByString/$page", headers)
-        }
-    }
-
-    override fun searchMangaParse(response: Response): MangasPage = popularMangaParse(response)
-
     private fun getStatus(status: String) = when (status) {
         "ยังไม่จบ" -> SManga.ONGOING
         "จบแล้ว" -> SManga.COMPLETED
         else -> SManga.UNKNOWN
     }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get(getMangaUrl(manga)).asJsoup()
+        return SMangaUpdate(parseMangaDetails(document), getChapterList(document))
+    }
+
+    private fun parseMangaDetails(document: Document): SManga {
         val info = document.selectFirst("div.series__info")!!
         val facts = info.select("div.fact").associate { it.selectFirst("span")!!.text() to it.selectFirst("b")!! }
 
@@ -91,12 +101,12 @@ abstract class Niceoppai : HttpSource() {
     }
 
     // The first page of the chapter list is the manga page itself; the rest are at /chapter-list/<n>/
-    override fun chapterListParse(response: Response): List<SChapter> {
-        var document = response.asJsoup()
+    private suspend fun getChapterList(mangaPage: Document): List<SChapter> {
+        var document = mangaPage
         val chapters = parseChapters(document).toMutableList()
         while (true) {
             val next = document.selectFirst("ul.pgg a:containsOwn(Next)")?.attr("abs:href") ?: break
-            document = client.newCall(GET(next, headers)).execute().asJsoup()
+            document = client.get(next).asJsoup()
             chapters += parseChapters(document)
         }
         return chapters
@@ -113,8 +123,8 @@ abstract class Niceoppai : HttpSource() {
         }
     }
 
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val document = client.get(getChapterUrl(chapter)).asJsoup()
         // Scrambled pages are an empty div followed by a packed script handing the tile map to the reader
         val images = document.select("#image-container img, #image-container div[id] + script").map { element ->
             if (element.tagName() == "img") {
@@ -128,9 +138,7 @@ abstract class Niceoppai : HttpSource() {
         return images.mapIndexed { i, url -> Page(i, imageUrl = url) }
     }
 
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
-    override fun getFilterList(): FilterList = FilterList(
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
         OrderByFilter(
             ORDER_BY_FILTER_TITLE,
             ORDER_BY_FILTER_OPTIONS.zip(ORDER_BY_FILTER_OPTIONS_VALUES).toList(),
@@ -173,9 +181,9 @@ abstract class Niceoppai : HttpSource() {
                 val cleanedDate = date.split(" ").joinToString(" ") {
                     if (ordinalRegex.containsMatchIn(it)) it.replace(ordinalRegex, "") else it
                 }
-                dateFormat.tryParse(cleanedDate)
+                dateFormat.tryParseDate(cleanedDate)
             }
-            else -> dateFormat.tryParse(date)
+            else -> dateFormat.tryParseDate(date)
         }
     }
 
@@ -196,9 +204,7 @@ abstract class Niceoppai : HttpSource() {
     }
 
     companion object {
-        private val dateFormat: SimpleDateFormat by lazy {
-            SimpleDateFormat("MMM dd, yyyy", Locale.US)
-        }
+        private val dateFormat = DateTimeFormatter.ofPattern("MMM dd, yyyy", Locale.US)
         private val relativeDateRegex = Regex("""(\d+)""")
         private val ordinalRegex = Regex("""\d(st|nd|rd|th)""")
     }
