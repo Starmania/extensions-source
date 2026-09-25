@@ -1,47 +1,36 @@
 package eu.kanade.tachiyomi.extension.tr.golgebahcesi
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 
 @Source
-abstract class GolgeBahcesi : HttpSource() {
+abstract class GolgeBahcesi : KeiSource() {
 
     private val apiBaseUrl = "https://api.golgebahcesi.com/api"
-    override val supportsLatest = true
 
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
-        .add("Origin", baseUrl)
+    override suspend fun getPopularManga(page: Int): MangasPage = getSeriesList("$apiBaseUrl/series?page=$page&limit=24&sort=popular".toHttpUrl())
 
-    override fun popularMangaRequest(page: Int): Request = GET("$apiBaseUrl/series?page=$page&limit=24&sort=popular", headers)
+    override suspend fun getLatestUpdates(page: Int): MangasPage = getSeriesList("$apiBaseUrl/series?page=$page&limit=24&sort=updatedAt".toHttpUrl())
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val result = response.parseAs<SeriesListResponse>()
-        val mangas = result.data.map { it.toSManga() }
-        val hasNextPage = result.pagination?.let { it.currentPage < it.totalPages } ?: false
-        return MangasPage(mangas, hasNextPage)
-    }
-
-    override fun latestUpdatesRequest(page: Int): Request = GET("$apiBaseUrl/series?page=$page&limit=24&sort=updatedAt", headers)
-
-    override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val sort = filters.firstInstanceOrNull<SortFilter>()?.toUriPart() ?: "default"
         val status = filters.firstInstanceOrNull<StatusFilter>()?.toUriPart() ?: ""
         val type = filters.firstInstanceOrNull<TypeFilter>()?.toUriPart() ?: ""
@@ -55,25 +44,39 @@ abstract class GolgeBahcesi : HttpSource() {
         if (genre.isNotBlank()) url.addQueryParameter("genre", genre)
         if (minChapters.isNotBlank()) url.addQueryParameter("minChapters", minChapters)
 
-        return GET(url.build(), headers)
+        return getSeriesList(url.build())
     }
 
-    override fun searchMangaParse(response: Response): MangasPage {
-        val result = response.parseAs<SeriesListResponse>()
+    private suspend fun getSeriesList(url: HttpUrl): MangasPage {
+        val result = client.get(url).parseAs<SeriesListResponse>()
         val mangas = result.data.map { it.toSManga() }
         val hasNextPage = result.pagination?.let { it.currentPage < it.totalPages } ?: false
         return MangasPage(mangas, hasNextPage)
     }
 
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host.removePrefix("www.") != baseUrl.toHttpUrl().host) return null
+        val segments = url.pathSegments
+        if (segments.size < 2 || segments[0] != "manga") return null
+        return getMangaDetails(segments[1])
+    }
+
     override fun getMangaUrl(manga: SManga): String = "$baseUrl/manga/${manga.url}"
 
-    override fun mangaDetailsRequest(manga: SManga): Request = GET("$apiBaseUrl/series/${manga.url}", headers)
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate = coroutineScope {
+        val detailsDeferred = async { if (fetchDetails) getMangaDetails(manga.url) else manga }
+        val chaptersDeferred = async { if (fetchChapters) getChapterList(manga.url) else chapters }
+        SMangaUpdate(detailsDeferred.await(), chaptersDeferred.await())
+    }
 
-    override fun mangaDetailsParse(response: Response): SManga = response.parseAs<SeriesDto>().toSManga()
+    private suspend fun getMangaDetails(slug: String): SManga = client.get("$apiBaseUrl/series/$slug").parseAs<SeriesDto>().toSManga()
 
-    override fun chapterListRequest(manga: SManga): Request = GET("$apiBaseUrl/series/${manga.url}/chapters", headers)
-
-    override fun chapterListParse(response: Response): List<SChapter> = response.parseAs<List<ChapterDto>>().map { chapter ->
+    private suspend fun getChapterList(slug: String): List<SChapter> = client.get("$apiBaseUrl/series/$slug/chapters").parseAs<List<ChapterDto>>().map { chapter ->
         SChapter.create().apply {
             url = "/${chapter.id}/${chapter.seriesSlug}/${chapter.slug}"
             name = chapter.title
@@ -87,24 +90,20 @@ abstract class GolgeBahcesi : HttpSource() {
         return "$baseUrl/manga/${segments[1]}/bolum/${segments[2]}"
     }
 
-    override fun pageListRequest(chapter: SChapter): Request {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val chapterId = "$baseUrl${chapter.url}".toHttpUrl().pathSegments[0]
-        return GET("$apiBaseUrl/chapters/$chapterId", headers)
-    }
-
-    override fun pageListParse(response: Response): List<Page> {
-        val chapter = response.parseAs<ChapterDto>()
+        val result = client.get("$apiBaseUrl/chapters/$chapterId").parseAs<ChapterDto>()
         // "secure" chapters serve encrypted images whose keys come from a manifest gated by
         // Turnstile, a browser fingerprint and an obfuscated WASM integrity check
-        if (chapter.deliverySystem == "secure") {
+        if (result.deliverySystem == "secure") {
             throw Exception("This chapter uses encrypted images, open it in WebView")
         }
-        return chapter.pages?.map { page ->
+        return result.pages?.map { page ->
             Page(page.index, imageUrl = page.url)
         } ?: emptyList()
     }
 
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?) = FilterList(
         SortFilter(),
         StatusFilter(),
         TypeFilter(),
@@ -117,8 +116,4 @@ abstract class GolgeBahcesi : HttpSource() {
             timeZone = TimeZone.getTimeZone("UTC")
         }
     }
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
-    override fun imageUrlRequest(page: Page): Request = throw UnsupportedOperationException()
 }

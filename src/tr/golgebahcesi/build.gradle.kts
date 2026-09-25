@@ -6,9 +6,9 @@ plugins {
 
 keiyoushi {
     name = "Gölge Bahçesi"
-    versionCode = 34
+    versionCode = 35
     contentWarning = ContentWarning.SAFE
-    libVersion = "1.4"
+    libVersion = "1.6"
 
     source {
         lang = "tr"
