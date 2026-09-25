@@ -24,12 +24,11 @@ import kotlin.time.Duration.Companion.seconds
 @Source
 abstract class MangaToon : HttpSource() {
 
-    private val urlLang: String get() = if (lang == "zh") {
-        "cn"
-    } else if (lang == "pt-BR") {
-        "pt"
-    } else {
-        lang
+    private val langUrl: String get() = when (lang) {
+        "zh" -> "$baseUrl/cn"
+        "pt-BR" -> "$baseUrl/pt"
+        "fr" -> baseUrl
+        else -> "$baseUrl/$lang"
     }
 
     override val supportsLatest = true
@@ -53,7 +52,7 @@ abstract class MangaToon : HttpSource() {
     override fun popularMangaRequest(page: Int): Request {
         // Portuguese website doesn't seem to have popular titles.
         val path = if (lang == "pt-BR") "comic" else "hot"
-        return GET("$baseUrl/$urlLang/genre/$path?type=1&page=${page - 1}", headers)
+        return GET("$langUrl/genre/$path?type=1&page=${page - 1}", headers)
     }
 
     override fun popularMangaParse(response: Response): MangasPage {
@@ -63,12 +62,12 @@ abstract class MangaToon : HttpSource() {
         return MangasPage(mangas, hasNextPage)
     }
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/$urlLang/genre/new?type=1&page=${page - 1}", headers)
+    override fun latestUpdatesRequest(page: Int): Request = GET("$langUrl/genre/new?type=1&page=${page - 1}", headers)
 
     override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val searchUrl = "$baseUrl/$urlLang/search".toHttpUrl().newBuilder()
+        val searchUrl = "$langUrl/search".toHttpUrl().newBuilder()
             .addQueryParameter("word", query)
             .toString()
         return GET(searchUrl, headers)

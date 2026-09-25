@@ -6,14 +6,15 @@ plugins {
 
 keiyoushi {
     name = "MangaToon (Limited)"
-    versionCode = 8
+    versionCode = 9
     contentWarning = ContentWarning.SAFE
     libVersion = "1.4"
 
     listOf("zh", "en", "id", "vi", "es", "th", "fr", "ja", "pt-BR").forEach {
         source {
             lang = it
-            baseUrl = "https://mangatoon.mobi"
+            // French moved to its own subdomain, without the language path segment
+            baseUrl = if (it == "fr") "https://fr.mangatoon.mobi" else "https://mangatoon.mobi"
             if (it == "pt-BR") id = 2064722193112934135
         }
     }
