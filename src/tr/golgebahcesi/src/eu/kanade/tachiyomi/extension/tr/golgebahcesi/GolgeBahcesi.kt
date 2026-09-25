@@ -92,9 +92,17 @@ abstract class GolgeBahcesi : HttpSource() {
         return GET("$apiBaseUrl/chapters/$chapterId", headers)
     }
 
-    override fun pageListParse(response: Response): List<Page> = response.parseAs<ChapterDto>().pages?.map { page ->
-        Page(page.index, imageUrl = page.url)
-    } ?: emptyList()
+    override fun pageListParse(response: Response): List<Page> {
+        val chapter = response.parseAs<ChapterDto>()
+        // "secure" chapters serve encrypted images whose keys come from a manifest gated by
+        // Turnstile, a browser fingerprint and an obfuscated WASM integrity check
+        if (chapter.deliverySystem == "secure") {
+            throw Exception("This chapter uses encrypted images, open it in WebView")
+        }
+        return chapter.pages?.map { page ->
+            Page(page.index, imageUrl = page.url)
+        } ?: emptyList()
+    }
 
     override fun getFilterList() = FilterList(
         SortFilter(),
