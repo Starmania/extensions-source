@@ -1,73 +1,59 @@
 package eu.kanade.tachiyomi.extension.all.baobua
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import eu.kanade.tachiyomi.source.model.UpdateStrategy
-import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstance
 import keiyoushi.utils.tryParse
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
 import org.jsoup.nodes.Document
 import kotlin.time.Instant
 
 @Source
-abstract class BaoBua : HttpSource() {
+abstract class BaoBua : KeiSource() {
 
     override val supportsLatest = false
-    override val disableRelatedMangas = true
 
-    override val client: OkHttpClient = network.client.newBuilder()
-        .rateLimit(3)
-        .build()
-
-    override fun headersBuilder() = super.headersBuilder()
-        .set("Referer", "$baseUrl/")
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(3)
 
     // ========================= Popular =========================
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/?page=$page", headers)
-
-    override fun popularMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
-        return parseMangasPage(document)
-    }
+    override suspend fun getPopularManga(page: Int): MangasPage = parseMangasPage(client.get("$baseUrl/?page=$page").asJsoup())
 
     // ========================= Latest  =========================
-    override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
-
-    override fun latestUpdatesParse(response: Response): MangasPage = throw UnsupportedOperationException()
+    override suspend fun getLatestUpdates(page: Int): MangasPage = throw UnsupportedOperationException()
 
     // ========================= Search  =========================
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        if (query.isNotBlank()) {
-            val url = query.toHttpUrlOrNull()
-            if (url != null && url.host == baseUrl.toHttpUrlOrNull()?.host) {
-                return GET(query, headers)
-            }
-            throw Exception("Full-text search is not supported")
-        }
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        if (query.isNotBlank()) throw Exception("Full-text search is not supported")
 
         val filter = filters.firstInstance<SourceCategorySelector>()
         return filter.selectedCategory?.let {
-            GET(it.buildUrl(baseUrl, page), headers)
-        } ?: popularMangaRequest(page)
+            parseMangasPage(client.get(it.buildUrl(baseUrl, page)).asJsoup())
+        } ?: getPopularManga(page)
     }
 
-    override fun searchMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    // Deeplinks cover both single galleries and category listings.
+    override suspend fun getMangasByUrl(url: HttpUrl, page: Int): MangasPage {
+        if (url.host != baseUrl.toHttpUrl().host) throw Exception("Full-text search is not supported")
+
+        val document = client.get(url).asJsoup()
 
         if (document.selectFirst(IMAGE_SELECTOR) != null) {
-            val manga = mangaDetailsParse(document).apply {
-                url = response.request.url.encodedPath
+            val manga = parseMangaDetails(document).apply {
+                this.url = url.encodedPath
                 title = document.selectFirst(".s-denomination .box-mt-output")?.text()
                     ?.removePrefix(TITLE_PREFIX)
                     ?: throw Exception("Title is mandatory")
@@ -82,38 +68,41 @@ abstract class BaoBua : HttpSource() {
     }
 
     // ========================= Details =========================
-    override fun mangaDetailsParse(response: Response): SManga = mangaDetailsParse(response.asJsoup())
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val response = client.get(getMangaUrl(manga))
+        val requestUrl = response.request.url.toString()
+        val document = response.asJsoup()
+        return SMangaUpdate(parseMangaDetails(document), parseChapterList(document, requestUrl))
+    }
 
-    private fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
+    private fun parseMangaDetails(document: Document): SManga = SManga.create().apply {
         genre = document.select(".it-cat-content a").joinToString { it.text() }
         status = SManga.COMPLETED
     }
 
-    override fun getMangaUrl(manga: SManga): String = "$baseUrl${manga.url}"
-
     // ========================= Chapters=========================
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
-        return listOf(
-            SChapter.create().apply {
-                chapter_number = 0F
-                val absUrl = document.selectFirst("link[rel=canonical]")?.absUrl("href")
-                    ?: response.request.url.toString()
-                url = absUrl.toHttpUrlOrNull()?.encodedPath ?: absUrl
-                date_upload = DATE_PUBLISHED_REGEX.find(document.select("script[type=application/ld+json]").html())
-                    ?.groupValues?.get(1)
-                    .let { Instant.tryParse(it) }
-                name = "Gallery"
-            },
-        )
-    }
-
-    override fun getChapterUrl(chapter: SChapter): String = "$baseUrl${chapter.url}"
+    private fun parseChapterList(document: Document, requestUrl: String): List<SChapter> = listOf(
+        SChapter.create().apply {
+            chapter_number = 0F
+            val absUrl = document.selectFirst("link[rel=canonical]")?.absUrl("href")
+                ?: requestUrl
+            url = absUrl.toHttpUrlOrNull()?.encodedPath ?: absUrl
+            date_upload = DATE_PUBLISHED_REGEX.find(document.select("script[type=application/ld+json]").html())
+                ?.groupValues?.get(1)
+                .let { Instant.tryParse(it) }
+            name = "Gallery"
+        },
+    )
 
     // ========================= Pages   =========================
-    override fun pageListParse(response: Response): List<Page> = recursivePageListParse(response.asJsoup())
+    override suspend fun getPageList(chapter: SChapter): List<Page> = recursivePageListParse(client.get(getChapterUrl(chapter)).asJsoup())
 
-    private fun recursivePageListParse(document: Document): List<Page> {
+    private suspend fun recursivePageListParse(document: Document): List<Page> {
         val pages = document.select(IMAGE_SELECTOR)
             .mapIndexed { index, element ->
                 Page(index, imageUrl = normalizeImageUrl(element.absUrl("src")))
@@ -123,19 +112,14 @@ abstract class BaoBua : HttpSource() {
             ?.absUrl("href")
             ?: return pages
 
-        val nextDoc = client.newCall(GET(nextPageUrl, headers))
-            .execute().use { it.asJsoup() }
-
-        val nextPages = recursivePageListParse(nextDoc)
+        val nextPages = recursivePageListParse(client.get(nextPageUrl).asJsoup())
         val offset = pages.size
         val redirectedNextPages = nextPages.map { Page(it.index + offset, it.url, it.imageUrl) }
         return pages + redirectedNextPages
     }
 
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
     // ========================= Filters =========================
-    override fun getFilterList(): FilterList = FilterList(
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
         SourceCategorySelector.create(),
     )
 
