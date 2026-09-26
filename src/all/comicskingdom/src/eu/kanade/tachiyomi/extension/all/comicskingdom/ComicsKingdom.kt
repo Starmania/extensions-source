@@ -2,7 +2,6 @@ package eu.kanade.tachiyomi.extension.all.comicskingdom
 
 import android.content.SharedPreferences
 import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -10,17 +9,16 @@ import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.getPreferencesLazy
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.json.Json
+import keiyoushi.utils.parseAs
+import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
 import org.jsoup.Jsoup
-import uy.kohesive.injekt.injectLazy
 import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.math.ceil
@@ -28,12 +26,9 @@ import kotlin.math.roundToInt
 
 @Source
 abstract class ComicsKingdom :
-    HttpSource(),
+    KeiSource(),
     ConfigurableSource {
 
-    override val supportsLatest = true
-
-    private val json: Json by injectLazy()
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault())
     private val compactChapterCountRegex = Regex("\"totalItems\":(\\d+)")
     private val thumbnailUrlRegex = Regex("thumbnailUrl\":\"(\\S+)\",\"dateP")
@@ -56,94 +51,105 @@ abstract class ComicsKingdom :
         addQueryParameter("_fields", ChapterFields)
     }
 
-    private fun getReq(orderBy: String, page: Int): Request = GET(
-        mangaApiUrl().apply {
+    private suspend fun getMangaList(orderBy: String, page: Int): MangasPage {
+        val url = mangaApiUrl().apply {
             addQueryParameter("orderBy", orderBy)
             addQueryParameter("page", page.toString())
-        }.build(),
-        headers,
-    )
+        }.build()
+        return client.get(url).parseAs<List<Manga>>().toMangasPage()
+    }
 
-    override fun popularMangaRequest(page: Int): Request = getReq("relevance", page)
-    override fun latestUpdatesRequest(page: Int): Request = getReq("modified", page)
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = GET(
-        mangaApiUrl().apply {
+    override suspend fun getPopularManga(page: Int): MangasPage = getMangaList("relevance", page)
+
+    override suspend fun getLatestUpdates(page: Int): MangasPage = getMangaList("modified", page)
+
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val url = mangaApiUrl().apply {
             addQueryParameter("search", query)
             addQueryParameter("page", page.toString())
 
-            if (!filters.isEmpty()) {
-                for (filter in filters) {
-                    when (filter) {
-                        is OrderFilter -> {
-                            addQueryParameter("orderby", filter.getValue())
-                        }
-
-                        is GenreList -> {
-                            if (filter.included.isNotEmpty()) {
-                                addQueryParameter(
-                                    "ck_genre",
-                                    filter.included.joinToString(","),
-                                )
-                            }
-                            if (filter.excluded.isNotEmpty()) {
-                                addQueryParameter(
-                                    "ck_genre_exclude",
-                                    filter.excluded.joinToString(","),
-                                )
-                            }
-                        }
-
-                        else -> {}
+            for (filter in filters) {
+                when (filter) {
+                    is OrderFilter -> {
+                        addQueryParameter("orderby", filter.getValue())
                     }
+
+                    is GenreList -> {
+                        if (filter.included.isNotEmpty()) {
+                            addQueryParameter(
+                                "ck_genre",
+                                filter.included.joinToString(","),
+                            )
+                        }
+                        if (filter.excluded.isNotEmpty()) {
+                            addQueryParameter(
+                                "ck_genre_exclude",
+                                filter.excluded.joinToString(","),
+                            )
+                        }
+                    }
+
+                    else -> {}
                 }
             }
-        }.build(),
-        headers,
+        }.build()
+        return client.get(url).parseAs<List<Manga>>().toMangasPage()
+    }
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val slug = url.pathSegments.lastOrNull { it.isNotEmpty() } ?: return null
+        val apiUrl = mangaApiUrl().addQueryParameter("slug", slug).build()
+        return client.get(apiUrl).parseAs<List<Manga>>().toMangasPage().mangas.firstOrNull()
+    }
+
+    private fun List<Manga>.toMangasPage() = MangasPage(
+        map {
+            SManga.create().apply {
+                thumbnail_url = thumbnailUrlRegex.find(it.yoast_head)?.groupValues?.get(1)
+                setUrlWithoutDomain(
+                    mangaApiUrl().apply {
+                        addPathSegment(it.id.toString())
+                        addQueryParameter("slug", it.link.toHttpUrl().pathSegments.last())
+                    }
+                        .build().toString(),
+                )
+                title = it.title.rendered
+            }
+        },
+        size == mangaPerPage,
     )
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        val list = json.decodeFromString<List<Manga>>(response.body.string())
-        return MangasPage(
-            list.map {
-                SManga.create().apply {
-                    thumbnail_url = thumbnailUrlRegex.find(it.yoast_head)?.groupValues?.get(1)
-                    setUrlWithoutDomain(
-                        mangaApiUrl().apply {
-                            addPathSegment(it.id.toString())
-                            addQueryParameter("slug", it.link.toHttpUrl().pathSegments.last())
-                        }
-                            .build().toString(),
-                    )
-                    title = it.title.rendered
-                }
-            },
-            list.count() == mangaPerPage,
-        )
-    }
-
-    override fun popularMangaParse(response: Response): MangasPage = searchMangaParse(response)
-    override fun latestUpdatesParse(response: Response): MangasPage = searchMangaParse(response)
-
-    override fun mangaDetailsParse(response: Response): SManga = SManga.create().apply {
-        val mangaData = json.decodeFromString<Manga>(response.body.string())
-        title = mangaData.title.rendered
-        author = mangaData.meta.ck_byline_on_app.substringAfter("By").trim()
-        description = Jsoup.parse(mangaData.content.rendered).text()
-        status = SManga.UNKNOWN
-        thumbnail_url = thumbnailUrlRegex.find(mangaData.yoast_head)?.groupValues?.get(1)
-    }
 
     override fun getMangaUrl(manga: SManga): String = "$baseUrl/${(baseUrl + manga.url).toHttpUrl().queryParameter("slug")}"
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val mangaData = json.decodeFromString<Manga>(response.body.string())
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val mangaData = client.get(baseUrl + manga.url).parseAs<Manga>()
+        val details = SManga.create().apply {
+            url = manga.url
+            title = mangaData.title.rendered
+            author = mangaData.meta.ck_byline_on_app.substringAfter("By").trim()
+            description = Jsoup.parse(mangaData.content.rendered).text()
+            status = SManga.UNKNOWN
+            thumbnail_url = thumbnailUrlRegex.find(mangaData.yoast_head)?.groupValues?.get(1)
+        }
+        return SMangaUpdate(
+            details,
+            if (fetchChapters) getChapterList(mangaData) else chapters,
+        )
+    }
+
+    private suspend fun getChapterList(mangaData: Manga): List<SChapter> {
         val mangaName = mangaData.link.toHttpUrl().pathSegments.last()
 
         if (shouldCompact()) {
-            val res = client.newCall(GET(mangaData.link)).execute()
-            val postCount = compactChapterCountRegex.findAll(res.body.string())
-                .find { result -> result.groupValues[1].toDouble() > 0 }!!.groupValues[1].toDouble()
-            res.close()
+            val postCount = client.get(mangaData.link).use { res ->
+                compactChapterCountRegex.findAll(res.body.string())
+                    .find { result -> result.groupValues[1].toDouble() > 0 }!!.groupValues[1].toDouble()
+            }
             val maxPage = ceil(postCount / chapterPerPage)
             return List(maxPage.roundToInt()) { idx ->
                 SChapter.create().apply {
@@ -165,7 +171,7 @@ abstract class ComicsKingdom :
         val chapters = mutableListOf<SChapter>()
         var pageNum = 1
 
-        var chapterData = getChapterList(mangaName, pageNum)
+        var chapterData = getChapterPage(mangaName, pageNum)
         var chapterNum = 0.0F
 
         while (chapterData != null) {
@@ -192,7 +198,7 @@ abstract class ComicsKingdom :
 
             pageNum++
             try {
-                chapterData = getChapterList(mangaName, pageNum)
+                chapterData = getChapterPage(mangaName, pageNum)
             } catch (exception: Exception) {
                 if (chapters.isNotEmpty()) {
                     return chapters
@@ -203,17 +209,14 @@ abstract class ComicsKingdom :
         return chapters
     }
 
-    private fun getChapterList(mangaName: String, page: Int): List<Chapter> {
+    private suspend fun getChapterPage(mangaName: String, page: Int): List<Chapter> {
         val url = chapterApiUrl().apply {
             addQueryParameter("order", "desc")
             addQueryParameter("ck_feature", mangaName)
             addQueryParameter("page", page.toString())
         }.build()
 
-        val call = client.newCall(GET(url, headers)).execute()
-        val body = call.body.string()
-        call.close()
-        return json.decodeFromString<List<Chapter>>(body)
+        return client.get(url).parseAs<List<Chapter>>()
     }
 
     override fun getChapterUrl(chapter: SChapter): String {
@@ -223,14 +226,15 @@ abstract class ComicsKingdom :
         return "$baseUrl/${(baseUrl + chapter.url).toHttpUrl().queryParameter("slug")}"
     }
 
-    override fun pageListParse(response: Response): List<Page> {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val response = client.get(baseUrl + chapter.url)
         if (shouldCompact()) {
-            return json.decodeFromString<List<Chapter>>(response.body.string())
+            return response.parseAs<List<Chapter>>()
                 .mapIndexed { idx, chapter ->
                     Page(idx, imageUrl = chapter.assets!!.single.url)
                 }
         }
-        val chapter = json.decodeFromString<Chapter>(response.body.string())
+        val chapter = response.parseAs<Chapter>()
         return listOf(Page(0, imageUrl = chapter.assets!!.single.url))
     }
 
@@ -261,7 +265,7 @@ abstract class ComicsKingdom :
             get() = state.filter { it.isExcluded() }.map { it.gid }
     }
 
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?) = FilterList(
         OrderFilter(),
         GenreList(getGenreList()),
     )
@@ -301,6 +305,4 @@ abstract class ComicsKingdom :
     private val preferences: SharedPreferences by getPreferencesLazy()
 
     private fun shouldCompact() = preferences.getBoolean("compactPref", true)
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 }
