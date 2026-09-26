@@ -6,13 +6,18 @@ plugins {
 
 keiyoushi {
     name = "TaimuMangas"
-    versionCode = 3
+    versionCode = 1
     contentWarning = ContentWarning.MIXED
-    libVersion = "1.4"
+    libVersion = "1.6"
 
     source {
         name = "Taimu Mangas"
         lang = "pt-BR"
         baseUrl = "https://beta.taimumangas.com"
+    }
+
+    deeplink {
+        path("/series/..*")
+        path("/reader/..*")
     }
 }

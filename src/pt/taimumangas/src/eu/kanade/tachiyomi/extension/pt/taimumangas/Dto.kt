@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.extension.pt.taimumangas
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import keiyoushi.utils.tryParse
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
@@ -10,9 +11,8 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.floatOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import java.text.SimpleDateFormat
 import java.util.Locale
-import java.util.TimeZone
+import kotlin.time.Instant
 
 @Serializable
 class LibraryResponse(
@@ -96,6 +96,12 @@ class ChapterSummary(
 @Serializable
 class ChapterDetailResponse(
     val pages: List<PageInfo> = emptyList(),
+    val series: ChapterSeries? = null,
+)
+
+@Serializable
+class ChapterSeries(
+    val identifier: String,
 )
 
 @Serializable
@@ -148,7 +154,7 @@ internal fun ChapterSummary.toSChapter(): SChapter = SChapter.create().apply {
     url = identifier
     chapter_number = chapterNumber
     name = "Capitulo $numberText"
-    date_upload = parseDate(publishedAt)
+    date_upload = Instant.tryParse(publishedAt)
 }
 
 internal fun PageInfo.toPage(index: Int): Page = Page(index, imageUrl = url)
@@ -160,32 +166,3 @@ private fun parseStatus(status: String?): Int = when (status?.lowercase(Locale.R
     "dropped" -> SManga.CANCELLED
     else -> SManga.UNKNOWN
 }
-
-private fun parseDate(date: String?): Long {
-    if (date.isNullOrBlank()) return 0L
-
-    val normalized = date.trim()
-        .replace(MICROSECONDS_REGEX, ".$1")
-        .replace(TIMEZONE_COLON_REGEX) { "${it.groupValues[1]}${it.groupValues[2]}" }
-
-    for (format in DATE_FORMATS) {
-        runCatching {
-            synchronized(format) {
-                format.parse(normalized)?.time
-            }
-        }.getOrNull()?.let { return it }
-    }
-
-    return 0L
-}
-
-private val MICROSECONDS_REGEX = Regex("""\.(\d{3})\d+""")
-private val TIMEZONE_COLON_REGEX = Regex("""([+-]\d{2}):(\d{2})$""")
-
-private val UTC = TimeZone.getTimeZone("UTC")
-private val DATE_FORMATS = listOf(
-    SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT).apply { timeZone = UTC },
-    SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.ROOT).apply { timeZone = UTC },
-    SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.ROOT),
-    SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ", Locale.ROOT),
-)
