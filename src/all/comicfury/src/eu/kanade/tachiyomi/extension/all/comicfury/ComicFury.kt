@@ -3,7 +3,6 @@ package eu.kanade.tachiyomi.extension.all.comicfury
 import android.content.SharedPreferences
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -11,16 +10,20 @@ import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.lib.textinterceptor.TextInterceptor
 import keiyoushi.lib.textinterceptor.TextInterceptorHelper
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.getPreferencesLazy
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
+import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
@@ -28,7 +31,7 @@ import java.util.Locale
 
 @Source
 abstract class ComicFury :
-    HttpSource(),
+    KeiSource(),
     ConfigurableSource {
     // override lang string used in MangaSearch; "notext" is the No Text variant of "other"
     private val siteLang: String
@@ -37,23 +40,18 @@ abstract class ComicFury :
             lang == "pt-BR" -> "pt"
             else -> lang
         }
-    override val supportsLatest: Boolean = true
 
-    override val client = network.client.newBuilder()
-        .addInterceptor(ContentWarningInterceptor())
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = addInterceptor(ContentWarningInterceptor())
         .addInterceptor(TextInterceptor())
-        .build()
 
     // ========================= Popular =========================
-    override fun popularMangaRequest(page: Int): Request = searchMangaRequest(page, "", getFilterList(1))
-    override fun popularMangaParse(response: Response): MangasPage = searchMangaParse(response)
+    override suspend fun getPopularManga(page: Int): MangasPage = getSearchMangaList(page, "", filters(1))
 
     // ========================= Latest =========================
-    override fun latestUpdatesRequest(page: Int): Request = searchMangaRequest(page, "", getFilterList(2))
-    override fun latestUpdatesParse(response: Response): MangasPage = searchMangaParse(response)
+    override suspend fun getLatestUpdates(page: Int): MangasPage = getSearchMangaList(page, "", filters(2))
 
     // ========================= Search =========================
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val req: HttpUrl.Builder = "$baseUrl/search.php".toHttpUrl().newBuilder()
         req.addQueryParameter("query", query)
         req.addQueryParameter("page", page.toString())
@@ -89,11 +87,7 @@ abstract class ComicFury :
             }
         }
 
-        return GET(req.build(), headers)
-    }
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        val jsp = response.asJsoup()
+        val jsp = client.get(req.build()).asJsoup()
         val list: MutableList<SManga> = arrayListOf()
         for (result in jsp.select("div.webcomic-result")) {
             list.add(
@@ -108,9 +102,9 @@ abstract class ComicFury :
     }
 
     // ========================= Filters =========================
-    override fun getFilterList(): FilterList = getFilterList(0)
+    override fun getFilterList(data: JsonElement?): FilterList = filters(0)
 
-    private fun getFilterList(sortIndex: Int): FilterList = FilterList(
+    private fun filters(sortIndex: Int): FilterList = FilterList(
         TagsFilter(),
         Filter.Separator(),
         SortFilter(sortIndex),
@@ -132,19 +126,31 @@ abstract class ComicFury :
     }
 
     // ========================= Details =========================
-    override fun mangaDetailsParse(response: Response): SManga {
-        val jsp = response.asJsoup()
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate = coroutineScope {
+        val mangaDeferred = async { if (fetchDetails) getMangaDetails(manga) else manga }
+        val chaptersDeferred = async { if (fetchChapters) getChapterList(manga) else chapters }
+
+        SMangaUpdate(mangaDeferred.await(), chaptersDeferred.await())
+    }
+
+    // manga.url is the comicprofile.php page, which holds the details; getMangaUrl points at the archive
+    private suspend fun getMangaDetails(manga: SManga): SManga {
+        val jsp = client.get(baseUrl + manga.url).asJsoup()
         val desDiv = jsp.selectFirst("div.description-tags")
         return SManga.create().apply {
-            setUrlWithoutDomain(response.request.url.toString())
             // If the description-tags div is null (common on profile pages or custom layout pages),
             // fallback to the custom layouts selector (username-and-title em).
             description = desDiv?.parent()?.ownText()
                 ?: jsp.selectFirst("div.username-and-title em")?.text()
             // Fallback to parsing from the profile page's authorinfo block when description-tags is null.
-            genre = desDiv?.children()?.eachText()?.joinToString(", ")
-                ?: jsp.select("div.authorinfo:contains(Genre) a").eachText().joinToString(", ")
-            author = jsp.select("a.authorname").eachText().joinToString(", ")
+            genre = desDiv?.children()?.eachText()?.joinToString()
+                ?: jsp.select("div.authorinfo:contains(Genre) a").eachText().joinToString()
+            author = jsp.select("a.authorname").eachText().joinToString()
             initialized = true
         }
     }
@@ -152,8 +158,6 @@ abstract class ComicFury :
     override fun getMangaUrl(manga: SManga): String = "$baseUrl/read/" + manga.url.substringAfter("?url=") + "/archive"
 
     // ========================= Chapters =========================
-    override fun chapterListRequest(manga: SManga): Request = GET("$baseUrl/read/${manga.url.substringAfter("?url=")}/archive")
-
     private val archiveSelector = "a:has(div.archive-chapter)"
     private val chapterSelector = "a:has(div.archive-comic)"
     private val nextPageSelector = "span.vfpagecurrent + a.vfpage"
@@ -165,7 +169,7 @@ abstract class ComicFury :
         date_upload = this@toSManga.select(".archive-comic-date").text().toDate()
     }
 
-    private fun collect(startPage: Document, chapterHeader: String? = null): List<SChapter> {
+    private suspend fun collect(startPage: Document, chapterHeader: String? = null): List<SChapter> {
         val chapters = mutableListOf<SChapter>()
         var currentPage = startPage
 
@@ -179,15 +183,15 @@ abstract class ComicFury :
 
             // Fetch the next page and repeat. If there are no more pages, exit.
             val nextPageButton = currentPage.selectFirst(nextPageSelector) ?: break
-            val url = nextPageButton.absUrl("href")
-            currentPage = client.newCall(GET(url, headers)).execute().asJsoup()
+            currentPage = client.get(nextPageButton.absUrl("href")).asJsoup()
         }
 
         return chapters
     }
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val jsp = response.asJsoup()
+    private suspend fun getChapterList(manga: SManga): List<SChapter> {
+        val slug = manga.url.substringAfter("?url=")
+        val jsp = client.get("$baseUrl/read/$slug/archive").asJsoup()
         val chapters = mutableListOf<SChapter>()
 
         val archiveElements = jsp.select(archiveSelector)
@@ -195,7 +199,7 @@ abstract class ComicFury :
             archiveElements.forEach { element ->
                 val url = element.absUrl("href")
                 val chapterHeader = element.select(".archive-chapter-title").text().ifEmpty { element.text() }
-                val currentPage = client.newCall(GET(url, headers)).execute().asJsoup()
+                val currentPage = client.get(url).asJsoup()
                 chapters.addAll(collect(currentPage, chapterHeader))
             }
         } else {
@@ -204,29 +208,24 @@ abstract class ComicFury :
 
         // Fallback when "Infinite Scroll View" is disabled by the author.
         // We fetch and parse the custom layout site under <slug>.webcomic.ws.
-        if (chapters.isEmpty()) {
-            val pathSegments = response.request.url.pathSegments
-            val readIndex = pathSegments.indexOf("read")
-            val slug = if (readIndex != -1 && readIndex + 1 < pathSegments.size) pathSegments[readIndex + 1] else ""
-            if (slug.isNotEmpty()) {
-                val customUrl = "https://$slug.webcomic.ws/archive/comics"
-                try {
-                    val customDoc = client.newCall(GET(customUrl, headers)).execute().asJsoup()
-                    customDoc.select("div.archivecomic, div.nl-archivecomic").forEach { element ->
-                        val linkElement = element.selectFirst("a") ?: return@forEach
-                        val chapterHeader = element.parent()?.previousElementSibling()?.selectFirst("h3")?.text()
-                        chapters.add(
-                            SChapter.create().apply {
-                                url = linkElement.absUrl("href")
-                                val comicName = linkElement.text()
-                                name = if (chapterHeader.isNullOrEmpty()) comicName else "$chapterHeader - $comicName"
-                                date_upload = element.selectFirst(".comicposttime, .nl-archivecomicposttime")?.text()?.toDate() ?: 0L
-                            },
-                        )
-                    }
-                } catch (_: Exception) {
-                    // Ignore and return empty list
+        if (chapters.isEmpty() && slug.isNotEmpty()) {
+            val customUrl = "https://$slug.webcomic.ws/archive/comics"
+            try {
+                val customDoc = client.get(customUrl).asJsoup()
+                customDoc.select("div.archivecomic, div.nl-archivecomic").forEach { element ->
+                    val linkElement = element.selectFirst("a") ?: return@forEach
+                    val chapterHeader = element.parent()?.previousElementSibling()?.selectFirst("h3")?.text()
+                    chapters.add(
+                        SChapter.create().apply {
+                            url = linkElement.absUrl("href")
+                            val comicName = linkElement.text()
+                            name = if (chapterHeader.isNullOrEmpty()) comicName else "$chapterHeader - $comicName"
+                            date_upload = element.selectFirst(".comicposttime, .nl-archivecomicposttime")?.text()?.toDate() ?: 0L
+                        },
+                    )
                 }
+            } catch (_: Exception) {
+                // Ignore and return empty list
             }
         }
 
@@ -236,37 +235,28 @@ abstract class ComicFury :
     }
 
     // ========================= Pages =========================
-    override fun pageListRequest(chapter: SChapter): Request {
-        val url = if (chapter.url.startsWith("http")) {
-            chapter.url
-        } else {
-            "$baseUrl${chapter.url}"
-        }
-        return GET(url, headers)
+    // Chapters from the <slug>.webcomic.ws fallback store absolute URLs
+    override fun getChapterUrl(chapter: SChapter): String = if (chapter.url.startsWith("http")) {
+        chapter.url
+    } else {
+        "$baseUrl${chapter.url}"
     }
 
-    override fun pageListParse(response: Response): List<Page> {
-        val jsp = response.asJsoup()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val jsp = client.get(getChapterUrl(chapter)).asJsoup()
         val pages: MutableList<Page> = arrayListOf()
         val comic = jsp.selectFirst("div.is--comic-page")
         if (comic != null) {
             // Infinite Scroll layout (default)
             for (child in comic.select("div.is--image-segment div img")) {
-                pages.add(
-                    Page(
-                        pages.size,
-                        response.request.url.toString(),
-                        child.attr("src"),
-                    ),
-                )
+                pages.add(Page(pages.size, imageUrl = child.attr("src")))
             }
             if (showAuthorsNotesPref()) {
                 for (child in comic.select("div.is--author-notes div.is--comment-box").withIndex()) {
                     pages.add(
                         Page(
                             pages.size,
-                            response.request.url.toString(),
-                            TextInterceptorHelper.createUrl(
+                            imageUrl = TextInterceptorHelper.createUrl(
                                 jsp.selectFirst("a.is--comment-author")?.ownText()
                                     ?.let { "Author's Notes from $it" }
                                     .orEmpty(),
@@ -278,21 +268,12 @@ abstract class ComicFury :
             }
         } else {
             // Custom layout fallback (Infinite Scroll disabled)
-            val images = jsp.select("#comicimage")
-            for (child in images) {
-                pages.add(
-                    Page(
-                        pages.size,
-                        response.request.url.toString(),
-                        child.attr("src"),
-                    ),
-                )
+            for (child in jsp.select("#comicimage")) {
+                pages.add(Page(pages.size, imageUrl = child.attr("src")))
             }
         }
         return pages
     }
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
     // START OF AUTHOR NOTES //
     private val preferences: SharedPreferences by getPreferencesLazy()
