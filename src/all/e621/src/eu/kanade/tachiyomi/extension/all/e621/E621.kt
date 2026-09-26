@@ -3,23 +3,24 @@ package eu.kanade.tachiyomi.extension.all.e621
 import android.content.SharedPreferences
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.extension.BuildConfig
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
+import kotlinx.serialization.json.JsonElement
 import okhttp3.Credentials
 import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
 import java.text.SimpleDateFormat
 import java.util.Locale
 
@@ -31,10 +32,8 @@ private const val NO_IMAGE_PLACEHOLDER = "https://placehold.co/256x256/cccccc/f6
 
 @Source
 abstract class E621 :
-    HttpSource(),
+    KeiSource(),
     ConfigurableSource {
-
-    override val supportsLatest: Boolean = true
 
     private val preferences: SharedPreferences by getPreferencesLazy()
 
@@ -42,8 +41,8 @@ abstract class E621 :
 
     @Volatile private var cachedAccountBlacklistCredentials: String? = null
 
-    override fun headersBuilder() = super.headersBuilder()
-        .set("User-Agent", "E621/1.4.${BuildConfig.VERSION_CODE} Keiyoushi (https://github.com/keiyoushi/extensions-source)")
+    override fun Headers.Builder.configureHeaders(): Headers.Builder = this
+        .set("User-Agent", "E621/${BuildConfig.VERSION_NAME} Keiyoushi (https://github.com/keiyoushi/extensions-source)")
 
     private fun apiHeaders(): Headers = headersBuilder().apply {
         val username = preferences.usernamePref.trim()
@@ -55,13 +54,13 @@ abstract class E621 :
 
     // ============================== Popular ==============================
 
-    override fun popularMangaRequest(page: Int): Request {
+    override suspend fun getPopularManga(page: Int): MangasPage {
         val searchMode = preferences.searchModePref
         val category = preferences.categoryPref
         val popularMode = preferences.popularModePref
         val firstEnd = preferences.firstEndPref
 
-        return searchMangaRequest(
+        return getSearchMangaList(
             page,
             "",
             FilterList(
@@ -73,16 +72,14 @@ abstract class E621 :
         )
     }
 
-    override fun popularMangaParse(response: Response): MangasPage = searchMangaParse(response)
-
     // ============================== Latest ===============================
 
-    override fun latestUpdatesRequest(page: Int): Request {
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
         val searchMode = preferences.searchModePref
         val category = preferences.categoryPref
         val scoreThresh = preferences.scoreThreshPref
 
-        return searchMangaRequest(
+        return getSearchMangaList(
             page,
             "",
             FilterList(
@@ -94,11 +91,9 @@ abstract class E621 :
         )
     }
 
-    override fun latestUpdatesParse(response: Response): MangasPage = searchMangaParse(response)
-
     // ============================== Search ===============================
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val url = baseUrl.toHttpUrl().newBuilder()
             .addQueryParameter("page", "$page")
 
@@ -174,28 +169,30 @@ abstract class E621 :
             url.addQueryParameter("tags", tags)
         }
 
-        return GET(url.build(), apiHeaders())
+        val response = client.get(url.build(), apiHeaders())
+
+        return when (mode) {
+            "pools.json" -> {
+                val pools = response.parseAs<List<Pool>>()
+                parsePoolList(pools, pools.size >= 24)
+            }
+            "posts.json" -> {
+                val posts = response.parseAs<PostsResponse>().posts
+                val pools = batchFetchPools(posts.flatMap { it.poolIds })
+                parsePoolList(pools, posts.size >= 96)
+            }
+            else -> MangasPage(emptyList(), false)
+        }
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = when (response.request.url.encodedPath) {
-        "/pools.json" -> parsePoolList(response)
-        "/posts.json" -> parsePostsList(response)
-        else -> MangasPage(emptyList(), false)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host || url.pathSegments.getOrNull(0) != "pools") return null
+        val poolId = url.pathSegments.getOrNull(1)?.toIntOrNull() ?: return null
+        val pool = fetchPool(poolId.toString())
+        return parsePoolList(listOf(pool), false).mangas.first()
     }
 
-    private fun parsePoolList(response: Response): MangasPage {
-        val pools = response.parseAs<List<Pool>>()
-        return parsePoolListDirect(pools, pools.size >= 24)
-    }
-
-    private fun parsePostsList(response: Response): MangasPage {
-        val posts = response.parseAs<PostsResponse>().posts
-        val poolIds = posts.flatMap { it.poolIds }
-        val pools = batchFetchPools(poolIds)
-        return parsePoolListDirect(pools, posts.size >= 96)
-    }
-
-    private fun parsePoolListDirect(pools: List<Pool>, hasNextPage: Boolean): MangasPage {
+    private suspend fun parsePoolList(pools: List<Pool>, hasNextPage: Boolean): MangasPage {
         val thumbnailMap = batchFetchPostSamples(
             pools.mapNotNull { it.postIds.firstOrNull() },
         ).takeIf { it.isNotEmpty() } ?: emptyMap()
@@ -215,14 +212,22 @@ abstract class E621 :
 
     override fun getMangaUrl(manga: SManga): String = "$baseUrl/pools/${manga.url}"
 
-    override fun mangaDetailsRequest(manga: SManga): Request {
-        val poolId = manga.url
-        return GET("$baseUrl/pools/$poolId.json", apiHeaders())
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val pool = fetchPool(manga.url)
+        return SMangaUpdate(
+            manga = if (fetchDetails) mangaDetailsParse(pool) else manga,
+            chapters = if (fetchChapters) chapterListParse(pool) else chapters,
+        )
     }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val pool = response.parseAs<Pool>()
+    private suspend fun fetchPool(poolId: String): Pool = client.get("$baseUrl/pools/$poolId.json", apiHeaders()).parseAs()
 
+    private suspend fun mangaDetailsParse(pool: Pool): SManga {
         val cutoff = (pool.postIds.size * 0.2).toInt()
         val posts = if (preferences.betterDetailsPref) {
             batchFetchPosts(pool.postIds.drop(cutoff).take(40))
@@ -290,13 +295,7 @@ abstract class E621 :
 
     override fun getChapterUrl(chapter: SChapter): String = "$baseUrl${chapter.url}"
 
-    override fun chapterListRequest(manga: SManga): Request {
-        val poolId = manga.url
-        return GET("$baseUrl/pools/$poolId.json", apiHeaders())
-    }
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val pool = response.parseAs<Pool>()
+    private suspend fun chapterListParse(pool: Pool): List<SChapter> {
         val postIds = pool.postIds
         val title = pool.name.replace("_", " ")
 
@@ -382,30 +381,8 @@ abstract class E621 :
 
     // =============================== Pages ===============================
 
-    override fun pageListRequest(chapter: SChapter): Request {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val chapterUrl = "$baseUrl${chapter.url}".toHttpUrl()
-
-        return when (chapterUrl.pathSegments.getOrNull(0)) {
-            "posts" -> {
-                val postId = chapterUrl.pathSegments.last().toIntOrNull()
-                val url = "$baseUrl/posts.json".toHttpUrl().newBuilder().apply {
-                    if (postId != null) {
-                        addQueryParameter("tags", "id:$postId")
-                        addQueryParameter("limit", "1")
-                    }
-                }.build()
-                GET(url, apiHeaders())
-            }
-            "pools" -> {
-                val poolId = chapterUrl.pathSegments.last()
-                GET("$baseUrl/pools/$poolId.json", apiHeaders())
-            }
-            else -> GET("", apiHeaders())
-        }
-    }
-
-    override fun pageListParse(response: Response): List<Page> {
-        val url = response.request.url
 
         val blacklist: List<List<String>> = if (preferences.accountBlacklistPref) {
             fetchAccountBlacklist()
@@ -417,8 +394,15 @@ abstract class E621 :
             emptyList()
         }
 
-        if (url.encodedPath == "/posts.json") {
-            val post = response.parseAs<PostsResponse>().posts.firstOrNull()
+        if (chapterUrl.pathSegments.getOrNull(0) == "posts") {
+            val postId = chapterUrl.pathSegments.last().toIntOrNull()
+            val url = "$baseUrl/posts.json".toHttpUrl().newBuilder().apply {
+                if (postId != null) {
+                    addQueryParameter("tags", "id:$postId")
+                    addQueryParameter("limit", "1")
+                }
+            }.build()
+            val post = client.get(url, apiHeaders()).parseAs<PostsResponse>().posts.firstOrNull()
             val imageUrl = when {
                 post == null || isPostDeleted(post) -> DELETED_PLACEHOLDER
                 isBlacklisted(post, blacklist) -> BLACKLISTED_PLACEHOLDER
@@ -427,7 +411,7 @@ abstract class E621 :
             return listOf(Page(0, imageUrl = imageUrl))
         }
 
-        val postIds = response.parseAs<Pool>().postIds
+        val postIds = fetchPool(chapterUrl.pathSegments.last()).postIds
         if (postIds.isEmpty()) return emptyList()
 
         val posts = batchFetchPosts(postIds)
@@ -444,11 +428,9 @@ abstract class E621 :
         }
     }
 
-    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
-
     // ============================== Filters ==============================
 
-    override fun getFilterList(): FilterList = getE621FilterList(preferences.categoryPref)
+    override fun getFilterList(data: JsonElement?): FilterList = getE621FilterList(preferences.categoryPref)
 
     // ============================= Utilities =============================
 
@@ -497,7 +479,7 @@ abstract class E621 :
         return null
     }
 
-    private fun batchFetchPosts(postIds: List<Int>): List<Post> {
+    private suspend fun batchFetchPosts(postIds: List<Int>): List<Post> {
         if (postIds.isEmpty()) return emptyList()
 
         return postIds.chunked(200).flatMap { chunk ->
@@ -508,15 +490,14 @@ abstract class E621 :
                     .addQueryParameter("limit", chunk.size.toString())
                     .build()
 
-                val data = client.newCall(GET(url, apiHeaders())).execute()
-                    .parseAs<PostsResponse>()
+                val data = client.get(url, apiHeaders()).parseAs<PostsResponse>()
 
                 data.posts.sortedBy { chunk.indexOf(it.id) }
             }.getOrDefault(emptyList())
         }
     }
 
-    private fun batchFetchPools(poolIds: List<Int>): List<Pool> {
+    private suspend fun batchFetchPools(poolIds: List<Int>): List<Pool> {
         if (poolIds.isEmpty()) return emptyList()
 
         return poolIds.distinct().chunked(100).flatMap { chunk ->
@@ -527,15 +508,14 @@ abstract class E621 :
                     .addQueryParameter("limit", chunk.size.toString())
                     .build()
 
-                val data = client.newCall(GET(url, apiHeaders())).execute()
-                    .parseAs<List<Pool>>()
+                val data = client.get(url, apiHeaders()).parseAs<List<Pool>>()
 
                 data.sortedBy { chunk.indexOf(it.id) }
             }.getOrDefault(emptyList())
         }
     }
 
-    private fun batchFetchPostSamples(postIds: List<Int>): Map<Int, String> {
+    private suspend fun batchFetchPostSamples(postIds: List<Int>): Map<Int, String> {
         if (postIds.isEmpty()) return emptyMap()
 
         return batchFetchPosts(postIds).mapNotNull { post ->
@@ -543,7 +523,7 @@ abstract class E621 :
         }.toMap()
     }
 
-    private fun fetchAccountBlacklist(): String {
+    private suspend fun fetchAccountBlacklist(): String {
         if (!preferences.accountBlacklistPref) return ""
 
         val username = preferences.usernamePref.trim()
@@ -557,7 +537,7 @@ abstract class E621 :
         }
 
         val blacklist = runCatching {
-            client.newCall(GET("$baseUrl/users/me.json", apiHeaders())).execute().use { response ->
+            client.get("$baseUrl/users/me.json", apiHeaders(), ensureSuccess = false).use { response ->
                 if (!response.isSuccessful) return@use ""
                 response.parseAs<UserMeResponse>().blacklistedTags ?: ""
             }
