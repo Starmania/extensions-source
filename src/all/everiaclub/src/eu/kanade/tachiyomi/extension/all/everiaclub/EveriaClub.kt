@@ -1,40 +1,37 @@
 package eu.kanade.tachiyomi.extension.all.everiaclub
 
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.asObservableSuccess
-import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
+import keiyoushi.utils.toJsonElement
 import keiyoushi.utils.tryParse
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.Request
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Response
 import org.jsoup.nodes.Element
-import rx.Observable
 import java.text.SimpleDateFormat
 import java.util.Locale
 
 @Source
-abstract class EveriaClub : HttpSource() {
-    override val supportsLatest = true
-
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
+abstract class EveriaClub : KeiSource() {
 
     private val Element.imgSrc: String
         get() = attr("data-lazy-src")
@@ -42,10 +39,8 @@ abstract class EveriaClub : HttpSource() {
             .ifEmpty { attr("src") }
 
     // ========================= Popular =========================
-    override fun popularMangaRequest(page: Int): Request = GET(baseUrl, headers)
-
-    override fun popularMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val document = client.get(baseUrl).asJsoup()
         val mangas = document.select(".wli_popular_posts-class li").map { element ->
             SManga.create().apply {
                 thumbnail_url = element.selectFirst("img")?.imgSrc
@@ -57,74 +52,14 @@ abstract class EveriaClub : HttpSource() {
     }
 
     // ========================= Latest =========================
-    override fun latestUpdatesRequest(page: Int): Request {
-        val url = "$baseUrl/wp-json/wp/v2/posts".toHttpUrlOrNull()!!.newBuilder()
-            .addQueryParameter("page", page.toString())
-            .addQueryParameter("per_page", "20")
-            .addQueryParameter("_embed", "wp:featuredmedia")
-            .build()
-        return GET(url, headers)
-    }
-
-    override fun latestUpdatesParse(response: Response): MangasPage {
-        val posts = response.parseAs<List<WPPostDto>>()
-        val mangas = posts.map { post ->
-            SManga.create().apply {
-                title = post.title.rendered
-                setUrlWithoutDomain(post.link)
-                thumbnail_url = post.thumbnail
-            }
-        }
-        val totalPages = response.header("X-WP-TotalPages")?.toIntOrNull() ?: 0
-        val currentPage = response.request.url.queryParameter("page")?.toIntOrNull() ?: 0
-        return MangasPage(mangas, currentPage < totalPages)
-    }
+    override suspend fun getLatestUpdates(page: Int): MangasPage = getSearchMangaList(page, "", FilterList())
 
     // ========================= Search =========================
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
-        if (query.startsWith("http")) {
-            val url = query.toHttpUrlOrNull()
-            if (url != null && url.host == baseUrl.toHttpUrlOrNull()?.host) {
-                val pathSegments = url.pathSegments.filter { it.isNotEmpty() }
-                if (pathSegments.isEmpty()) return super.fetchSearchManga(page, query, filters)
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val categoryFilter = filters.firstInstanceOrNull<CategoryFilter>()
+        val tagGroup = filters.firstInstanceOrNull<TagGroup>()
 
-                return if (pathSegments[0] == "category" || pathSegments[0] == "tag") {
-                    val newUrl = url.newBuilder().apply {
-                        val pageIdx = url.pathSegments.indexOf("page")
-                        if (pageIdx != -1) {
-                            setPathSegment(pageIdx + 1, page.toString())
-                        } else {
-                            addPathSegment("page")
-                            addPathSegment(page.toString())
-                        }
-                    }.build()
-                    client.newCall(GET(newUrl, headers)).asObservableSuccess().map { response ->
-                        parseHtmlMangasPage(response)
-                    }
-                } else {
-                    // Post link
-                    client.newCall(GET(query, headers)).asObservableSuccess().map { response ->
-                        val document = response.asJsoup()
-                        val manga = SManga.create().apply {
-                            this.url = url.encodedPath
-                            title = document.selectFirst(".entry-title")?.text()
-                                ?: throw Exception("Title is mandatory")
-                            thumbnail_url = document.selectFirst(".entry-content img")?.imgSrc
-                        }
-                        MangasPage(listOf(manga), false)
-                    }
-                }
-            }
-        }
-        return super.fetchSearchManga(page, query, filters)
-    }
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val filterList = filters.ifEmpty { getFilterList() }
-        val categoryFilter = filterList.firstInstanceOrNull<CategoryFilter>()
-        val tagGroup = filterList.firstInstanceOrNull<TagGroup>()
-
-        val url = "$baseUrl/wp-json/wp/v2/posts".toHttpUrlOrNull()!!.newBuilder()
+        val url = "$baseUrl/wp-json/wp/v2/posts".toHttpUrl().newBuilder()
             .addQueryParameter("page", page.toString())
             .addQueryParameter("per_page", "20")
             .addQueryParameter("_embed", "wp:featuredmedia")
@@ -149,173 +84,156 @@ abstract class EveriaClub : HttpSource() {
             }
         }
 
-        return GET(url.build(), headers)
+        val response = client.get(url.build())
+        val totalPages = response.header("X-WP-TotalPages")?.toIntOrNull() ?: 0
+        val mangas = response.parseAs<List<WPPostDto>>().map { post ->
+            SManga.create().apply {
+                title = post.title.rendered
+                setUrlWithoutDomain(post.link)
+                thumbnail_url = post.thumbnail
+            }
+        }
+        return MangasPage(mangas, page < totalPages)
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = latestUpdatesParse(response)
+    override suspend fun getMangasByUrl(url: HttpUrl, page: Int): MangasPage {
+        if (url.host != baseUrl.toHttpUrl().host) return MangasPage(emptyList(), false)
+        val pathSegments = url.pathSegments.filter { it.isNotEmpty() }
+        if (pathSegments.isEmpty()) return MangasPage(emptyList(), false)
+
+        if (pathSegments[0] == "category" || pathSegments[0] == "tag") {
+            val newUrl = url.newBuilder().apply {
+                val pageIdx = url.pathSegments.indexOf("page")
+                if (pageIdx != -1) {
+                    setPathSegment(pageIdx + 1, page.toString())
+                } else {
+                    addPathSegment("page")
+                    addPathSegment(page.toString())
+                }
+            }.build()
+            return parseHtmlMangasPage(client.get(newUrl))
+        }
+
+        val document = client.get(url).asJsoup()
+        val manga = SManga.create().apply {
+            this.url = url.encodedPath
+            title = document.selectFirst(".entry-title")?.text()
+                ?: throw Exception("Title is mandatory")
+            thumbnail_url = document.selectFirst(".entry-content img")?.imgSrc
+        }
+        return MangasPage(listOf(manga), false)
+    }
 
     // ========================= Details =========================
-    override fun mangaDetailsParse(response: Response): SManga = SManga.create().apply {
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val response = client.get(getMangaUrl(manga))
+        val requestUrl = response.request.url.toString()
         val document = response.asJsoup()
-        title = document.select(".entry-title").text()
-        description = document.select(".entry-title").text()
-        genre = document.select(".post-tags > a").joinToString(", ") { it.text() }
-        status = SManga.COMPLETED
-        initialized = true
+
+        val details = SManga.create().apply {
+            title = document.select(".entry-title").text()
+            description = document.select(".entry-title").text()
+            genre = document.select(".post-tags > a").joinToString { it.text() }
+            status = SManga.COMPLETED
+        }
+
+        val canonicalUrl = document.selectFirst("link[rel=\"canonical\"]")?.attr("href") ?: requestUrl
+        val chapter = SChapter.create().apply {
+            setUrlWithoutDomain(canonicalUrl)
+            chapter_number = -2f
+            name = "Gallery"
+            date_upload = getDate(canonicalUrl)
+        }
+
+        return SMangaUpdate(details, listOf(chapter))
     }
 
-    override val disableRelatedMangasBySearch = true
+    override val supportsRelatedMangas = true
 
     // TODO: After converting the whole extension to use API, we can request list of tags' ID directly then use them to build queries.
     override suspend fun fetchRelatedMangaList(manga: SManga): List<SManga> {
         val genres = manga.genre?.split(",")?.map { it.trim() } ?: return emptyList()
+        val tags = getFilterList().firstInstanceOrNull<TagGroup>()?.state.orEmpty()
         return genres.parallelCatchingFlatMap { genre ->
             val tag = tags.firstOrNull { it.name.equals(genre, ignoreCase = true) }
-            val request = if (tag != null) {
-                searchMangaRequest(
-                    1,
-                    "",
-                    FilterList(
+            val filters = if (tag != null) {
+                FilterList(
+                    TagGroup(
                         listOf(
-                            TagGroup(
-                                listOf(
-                                    TagFilter(tag.name, tag.id).apply { state = Filter.TriState.STATE_INCLUDE },
-                                ),
-                            ),
+                            TagFilter(tag.name, tag.id).apply { state = Filter.TriState.STATE_INCLUDE },
                         ),
                     ),
                 )
             } else {
-                searchMangaRequest(
-                    1,
-                    genre,
-                    FilterList(Filter.Header("Avoid running `launchFilters()`")),
-                )
+                FilterList()
             }
-            client.newCall(request).awaitSuccess().use { response ->
-                searchMangaParse(response).mangas
-            }
+            getSearchMangaList(1, if (tag != null) "" else genre, filters).mangas
         }
-    }
-
-    // ========================= Chapters =========================
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
-        return listOf(
-            SChapter.create().apply {
-                val canonicalUrl = document.selectFirst("link[rel=\"canonical\"]")?.attr("href")
-                    ?: response.request.url.toString()
-                setUrlWithoutDomain(canonicalUrl)
-                chapter_number = -2f
-                name = "Gallery"
-                date_upload = getDate(canonicalUrl)
-            },
-        )
     }
 
     // ========================= Pages =========================
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = client.newCall(pageListRequest(chapter))
-        .asObservableSuccess()
-        .flatMap { response ->
-            val document = response.asJsoup()
-            val pageLinks = document.select(".page-links a.post-page-numbers")
-                .map { it.attr("abs:href") }
-                .distinct()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val document = client.get(getChapterUrl(chapter)).asJsoup()
+        val pageLinks = document.select(".page-links a.post-page-numbers")
+            .map { it.attr("abs:href") }
+            .distinct()
 
-            if (pageLinks.isEmpty()) {
-                Observable.just(parseImages(document))
-            } else {
-                Observable.from(pageLinks)
-                    .flatMap({ url ->
-                        client.newCall(GET(url, headers)).asObservableSuccess()
-                            .map { it.asJsoup() }
-                            .onErrorReturn { null }
-                    }, 3)
-                    .toList()
-                    .map { docs ->
-                        val allDocs = listOf(document) + docs.filterNotNull()
-                        allDocs.flatMap { parseImages(it) }
+        val semaphore = Semaphore(3)
+        val otherDocs = coroutineScope {
+            pageLinks.map { url ->
+                async {
+                    semaphore.withPermit {
+                        runCatching { client.get(url).asJsoup() }.getOrNull()
                     }
-            }
+                }
+            }.awaitAll()
         }
-        .map { urls ->
-            urls.distinct()
-                .filter { it.isNotEmpty() && !it.startsWith("data:image") }
-                .mapIndexed { i, url -> Page(i, imageUrl = url) }
-        }
+
+        return (listOf(document) + otherDocs.filterNotNull())
+            .flatMap { parseImages(it) }
+            .distinct()
+            .filter { it.isNotEmpty() && !it.startsWith("data:image") }
+            .mapIndexed { i, url -> Page(i, imageUrl = url) }
+    }
 
     private fun parseImages(document: Element): List<String> {
         document.select("noscript").remove()
         return document.select(".entry-content img").map { it.imgSrc }
     }
 
-    override fun pageListParse(response: Response): List<Page> = throw UnsupportedOperationException()
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
     // ========================= Filters =========================
-    private var categories = arrayOf(
-        Pair("Any", ""),
-        Pair("China", "42"),
-        Pair("Cosplay", "7"),
-        Pair("Japan", "2"),
-        Pair("Korea", "11"),
-        Pair("Thailand", "1984"),
-    )
-    private var tags = emptyList<TagFilter>()
-    private var filtersState = FilterState.Unfetched
-    private var filterAttempts = 0
+    override val supportsFilterFetching = true
 
-    private enum class FilterState {
-        Fetching,
-        Fetched,
-        Unfetched,
+    override suspend fun fetchFilterData(): JsonElement {
+        val categories = client.get("$baseUrl/wp-json/wp/v2/categories?per_page=100&hide_empty=true")
+            .parseAs<List<WPCategoryDto>>()
+        val tags = client.get("$baseUrl/wp-json/wp/v2/tags?per_page=100&hide_empty=true&orderby=count&order=desc")
+            .parseAs<List<WPTagDto>>()
+        return FilterDataDto(categories, tags).toJsonElement()
     }
 
-    override fun getFilterList(): FilterList {
-        launchFilters()
+    override fun getFilterList(data: JsonElement?): FilterList {
+        val filterData = data?.parseAs<FilterDataDto>()
+        val categories = filterData?.categories
+            ?.map { it.name to it.id.toString() }
+            ?.let { arrayOf("Any" to "") + it }
+            ?: DEFAULT_CATEGORIES
+
         val filters = mutableListOf<Filter<*>>(
             Filter.Header("NOTE: Category filter can be combined with search."),
             Filter.Separator(),
             CategoryFilter(categories),
         )
-
+        val tags = filterData?.tags.orEmpty()
         if (tags.isNotEmpty()) {
-            filters.add(TagGroup(tags))
+            filters.add(TagGroup(tags.map { TagFilter(it.name, it.id) }))
         }
-
-        if (filtersState == FilterState.Fetching) {
-            filters.add(Filter.Header("Fetching tags from API..."))
-        }
-
         return FilterList(filters)
-    }
-
-    private fun launchFilters() {
-        if (filtersState != FilterState.Unfetched || filterAttempts >= 3) return
-        filtersState = FilterState.Fetching
-        filterAttempts++
-
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                client.newCall(GET("$baseUrl/wp-json/wp/v2/categories?per_page=100&hide_empty=true", headers))
-                    .awaitSuccess()
-                    .parseAs<List<WPCategoryDto>>()
-                    .let { catDtos ->
-                        categories = arrayOf("Any" to "") + catDtos.map { it.name to it.id.toString() }.toTypedArray()
-                    }
-                client.newCall(GET("$baseUrl/wp-json/wp/v2/tags?per_page=100&hide_empty=true&orderby=count&order=desc", headers))
-                    .awaitSuccess()
-                    .parseAs<List<WPTagDto>>()
-                    .let { tagDtos ->
-                        tags = tagDtos.map { TagFilter(it.name, it.id) }
-                    }
-
-                filtersState = FilterState.Fetched
-            } catch (_: Exception) {
-                filtersState = FilterState.Unfetched
-            }
-        }
     }
 
     // ========================= Helpers =========================
@@ -357,5 +275,14 @@ abstract class EveriaClub : HttpSource() {
     companion object {
         private val DATE_REGEX = """[0-9]{4}/[0-9]{2}/[0-9]{2}""".toRegex()
         private val DATE_FORMAT = SimpleDateFormat("yyyy/MM/dd", Locale.US)
+
+        private val DEFAULT_CATEGORIES = arrayOf(
+            Pair("Any", ""),
+            Pair("China", "42"),
+            Pair("Cosplay", "7"),
+            Pair("Japan", "2"),
+            Pair("Korea", "11"),
+            Pair("Thailand", "1984"),
+        )
     }
 }
