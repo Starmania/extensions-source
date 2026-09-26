@@ -18,8 +18,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
-import java.text.SimpleDateFormat
-import java.util.Locale
+import kotlin.time.Instant
 
 @Source
 abstract class BaoBua : HttpSource() {
@@ -66,13 +65,13 @@ abstract class BaoBua : HttpSource() {
     override fun searchMangaParse(response: Response): MangasPage {
         val document = response.asJsoup()
 
-        if (document.selectFirst(".product-item") == null && document.selectFirst(".article-body") != null) {
+        if (document.selectFirst(IMAGE_SELECTOR) != null) {
             val manga = mangaDetailsParse(document).apply {
-                val urlObj = response.request.url
-                url = urlObj.encodedPath
-                title = (document.selectFirst(".product-title") ?: document.selectFirst("h1") ?: document.selectFirst(".article-title") ?: document.selectFirst(".post-title"))?.text()?.trim()
+                url = response.request.url.encodedPath
+                title = document.selectFirst(".s-denomination .box-mt-output")?.text()
+                    ?.removePrefix(TITLE_PREFIX)
                     ?: throw Exception("Title is mandatory")
-                thumbnail_url = (document.selectFirst("img.product-imgreal") ?: document.selectFirst(".article-body img"))?.absUrl("src")
+                thumbnail_url = document.selectFirst(IMAGE_SELECTOR)?.absUrl("src")
                     ?.let { normalizeImageUrl(it) }
                 update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
             }
@@ -86,7 +85,7 @@ abstract class BaoBua : HttpSource() {
     override fun mangaDetailsParse(response: Response): SManga = mangaDetailsParse(response.asJsoup())
 
     private fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
-        genre = document.select(".article-tags a").joinToString { it.text() }
+        genre = document.select(".it-cat-content a").joinToString { it.text() }
         status = SManga.COMPLETED
     }
 
@@ -101,7 +100,9 @@ abstract class BaoBua : HttpSource() {
                 val absUrl = document.selectFirst("link[rel=canonical]")?.absUrl("href")
                     ?: response.request.url.toString()
                 url = absUrl.toHttpUrlOrNull()?.encodedPath ?: absUrl
-                date_upload = POST_DATE_FORMAT.tryParse(document.selectFirst(".article-date-comment .date")?.text())
+                date_upload = DATE_PUBLISHED_REGEX.find(document.select("script[type=application/ld+json]").html())
+                    ?.groupValues?.get(1)
+                    .let { Instant.tryParse(it) }
                 name = "Gallery"
             },
         )
@@ -113,7 +114,7 @@ abstract class BaoBua : HttpSource() {
     override fun pageListParse(response: Response): List<Page> = recursivePageListParse(response.asJsoup())
 
     private fun recursivePageListParse(document: Document): List<Page> {
-        val pages = document.select(".article-body img")
+        val pages = document.select(IMAGE_SELECTOR)
             .mapIndexed { index, element ->
                 Page(index, imageUrl = normalizeImageUrl(element.absUrl("src")))
             }
@@ -140,18 +141,19 @@ abstract class BaoBua : HttpSource() {
 
     // ========================= Helpers =========================
     private fun parseMangasPage(document: Document): MangasPage {
-        val mangas = document.select(".product-item").mapNotNull { element ->
+        val mangas = document.select(".videos .thumb-view").mapNotNull { element ->
             SManga.create().apply {
-                val absUrl = element.selectFirst("a")?.absUrl("href") ?: return@mapNotNull null
+                val link = element.selectFirst("a.denomination") ?: return@mapNotNull null
+                val absUrl = link.absUrl("href")
                 url = absUrl.toHttpUrlOrNull()?.encodedPath ?: absUrl
-                title = element.selectFirst(".product-title")?.text() ?: return@mapNotNull null
-                thumbnail_url = element.selectFirst("img.product-imgreal")?.absUrl("src")
+                title = link.text()
+                thumbnail_url = element.selectFirst("img.xld")?.absUrl("src")
                     ?.let { normalizeImageUrl(it) }
                 update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
             }
         }
 
-        val hasNextPage = document.selectFirst(".pagination-custom .nextPage") != null
+        val hasNextPage = document.selectFirst(".pagination-site a.next") != null
 
         return MangasPage(mangas, hasNextPage)
     }
@@ -166,6 +168,8 @@ abstract class BaoBua : HttpSource() {
     companion object {
         private val WP_COM_REGEX = Regex("""^https://i\d+\.wp\.com/""")
         private val WP_COM_REPLACE_REGEX = Regex("""https://i\d+\.wp\.com/""")
-        private val POST_DATE_FORMAT = SimpleDateFormat("EEE MMM dd yyyy", Locale.US)
+        private const val IMAGE_SELECTOR = ".video_block .contentme img"
+        private const val TITLE_PREFIX = "BaoBua.Net: "
+        private val DATE_PUBLISHED_REGEX = Regex(""""datePublished":"([^"]+)"""")
     }
 }
