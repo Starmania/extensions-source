@@ -4,49 +4,33 @@ import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 
 object KoharuFilters {
-    var genreList: List<Genre> = KoharuTags.genreList
-    var femaleList: List<Female> = KoharuTags.femaleList
-    var maleList: List<Male> = KoharuTags.maleList
-    var artistList: List<Artist> = KoharuTags.artistList
-    var circleList: List<Circle> = KoharuTags.circleList
-    var parodyList: List<Parody> = KoharuTags.parodyList
-    var mixedList: List<Mixed> = KoharuTags.mixedList
-    var otherList: List<Other> = KoharuTags.otherList
-
-    /**
-     * Whether tags have been fetched
-     */
-    internal var tagsFetched: Boolean = false
-
-    /**
-     * Inner variable to control how much tries the tags request was called.
-     */
-    internal var tagsFetchAttempts: Int = 0
-
-    fun getFilters(): FilterList = FilterList(
-        SortFilter("Sort by", getSortsList),
-        CategoryFilter("Category"),
-        Filter.Separator(),
-        TagFilter("Tags", genreList),
-        TagFilter("Female Tags", femaleList),
-        TagFilter("Male Tags", maleList),
-        TagFilter("Artists", artistList),
-        TagFilter("Circles", circleList),
-        TagFilter("Parodies", parodyList),
-        TagFilter("Mixed", mixedList),
-        TagFilter("Other", otherList),
-        GenreConditionFilter("Include condition", tagsConditionIncludeFilterOptions, "i"),
-        GenreConditionFilter("Exclude condition", tagsConditionExcludeFilterOptions, "e"),
-        Filter.Separator(),
-        Filter.Header("Separate tags with commas (,)"),
-        Filter.Header("Prepend with dash (-) to exclude"),
-        TextFilter("Magazines", "magazine"),
-        TextFilter("Publishers", "publisher"),
-        TextFilter("Characters", "character"),
-        TextFilter("Cosplayers", "cosplayer"),
-        Filter.Header("Filter by pages, for example: (>20)"),
-        TextFilter("Pages", "pages"),
-    )
+    fun getFilters(fetched: List<Tag>?): FilterList {
+        val tags = fetched?.takeIf { it.isNotEmpty() }
+        return FilterList(
+            SortFilter("Sort by", getSortsList),
+            CategoryFilter("Category"),
+            Filter.Separator(),
+            TagFilter("Tags", tags?.filterIsInstance<Genre>() ?: KoharuTags.genreList),
+            TagFilter("Female Tags", tags?.filterIsInstance<Female>() ?: KoharuTags.femaleList),
+            TagFilter("Male Tags", tags?.filterIsInstance<Male>() ?: KoharuTags.maleList),
+            TagFilter("Artists", tags?.filterIsInstance<Artist>() ?: KoharuTags.artistList),
+            TagFilter("Circles", tags?.filterIsInstance<Circle>() ?: KoharuTags.circleList),
+            TagFilter("Parodies", tags?.filterIsInstance<Parody>() ?: KoharuTags.parodyList),
+            TagFilter("Mixed", tags?.filterIsInstance<Mixed>() ?: KoharuTags.mixedList),
+            TagFilter("Other", tags?.filterIsInstance<Other>() ?: KoharuTags.otherList),
+            GenreConditionFilter("Include condition", tagsConditionIncludeFilterOptions, "i"),
+            GenreConditionFilter("Exclude condition", tagsConditionExcludeFilterOptions, "e"),
+            Filter.Separator(),
+            Filter.Header("Separate tags with commas (,)"),
+            Filter.Header("Prepend with dash (-) to exclude"),
+            TextFilter("Magazines", "magazine"),
+            TextFilter("Publishers", "publisher"),
+            TextFilter("Characters", "character"),
+            TextFilter("Cosplayers", "cosplayer"),
+            Filter.Header("Filter by pages, for example: (>20)"),
+            TextFilter("Pages", "pages"),
+        )
+    }
 
     internal open class TextFilter(name: String, val type: String) : Filter.Text(name)
     internal open class SortFilter(

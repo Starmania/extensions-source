@@ -1,61 +1,42 @@
 package eu.kanade.tachiyomi.extension.all.koharu
 
-import android.annotation.SuppressLint
-import android.app.Application
 import android.content.SharedPreferences
-import android.os.Handler
-import android.os.Looper
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
-import eu.kanade.tachiyomi.extension.all.koharu.KoharuFilters.artistList
-import eu.kanade.tachiyomi.extension.all.koharu.KoharuFilters.circleList
-import eu.kanade.tachiyomi.extension.all.koharu.KoharuFilters.femaleList
-import eu.kanade.tachiyomi.extension.all.koharu.KoharuFilters.genreList
-import eu.kanade.tachiyomi.extension.all.koharu.KoharuFilters.getFilters
-import eu.kanade.tachiyomi.extension.all.koharu.KoharuFilters.maleList
-import eu.kanade.tachiyomi.extension.all.koharu.KoharuFilters.mixedList
-import eu.kanade.tachiyomi.extension.all.koharu.KoharuFilters.otherList
-import eu.kanade.tachiyomi.extension.all.koharu.KoharuFilters.parodyList
-import eu.kanade.tachiyomi.extension.all.koharu.KoharuFilters.tagsFetchAttempts
-import eu.kanade.tachiyomi.extension.all.koharu.KoharuFilters.tagsFetched
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
-import eu.kanade.tachiyomi.network.asObservableSuccess
-import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.WebViewTimeoutException
 import keiyoushi.utils.getPreferencesLazy
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
+import keiyoushi.utils.parseAs
+import keiyoushi.utils.runWebViewBlocking
+import kotlinx.serialization.json.JsonElement
+import okhttp3.Call
+import okhttp3.FormBody
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.Response
-import rx.Observable
-import uy.kohesive.injekt.injectLazy
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Locale
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+import kotlin.time.Duration.Companion.seconds
 
 @Source
 abstract class Koharu :
-    HttpSource(),
+    KeiSource(),
     ConfigurableSource {
 
     private val preferences: SharedPreferences by getPreferencesLazy()
@@ -71,10 +52,6 @@ abstract class Koharu :
     private val apiUrl = API_DOMAIN
 
     private val apiBooksUrl = "$apiUrl/books"
-
-    override val supportsLatest = true
-
-    private val json: Json by injectLazy()
 
     private val shortenTitleRegex = Regex("""(\[[^]]*]|[({][^)}]*[)}])""")
     private fun String.shortenTitle() = replace(shortenTitleRegex, "").trim()
@@ -98,7 +75,7 @@ abstract class Koharu :
     private fun getDomain(): String {
         try {
             val noRedirectClient = client.newBuilder().followRedirects(false).build()
-            val host = noRedirectClient.newCall(GET(baseUrl, headers)).execute()
+            val host = noRedirectClient.newCall(Request.Builder().url(baseUrl).headers(headers).build()).execute()
                 .headers["Location"]?.toHttpUrlOrNull()?.host
                 ?: return baseUrl
             return "https://$host"
@@ -114,66 +91,55 @@ abstract class Koharu :
             .build()
     }
 
-    override val client: OkHttpClient = network.client.newBuilder()
-        .rateLimit(3)
-        .build()
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(3)
 
-    private val clearanceClient = network.client.newBuilder()
-        .addInterceptor { chain ->
-            val request = chain.request()
-            val url = request.url
-            val clearance = getClearance()
-                ?: throw IOException("Open webview to refresh token")
+    private val clearanceClient by lazy {
+        client.newBuilder()
+            .addInterceptor { chain ->
+                val request = chain.request()
+                val url = request.url
+                val clearance = getClearance(chain.call())
+                    ?: throw IOException("Open webview to refresh token")
 
-            val newUrl = url.newBuilder()
-                .setQueryParameter("crt", clearance)
-                .build()
-            val newRequest = request.newBuilder()
-                .url(newUrl)
-                .build()
+                val newUrl = url.newBuilder()
+                    .setQueryParameter("crt", clearance)
+                    .build()
+                val newRequest = request.newBuilder()
+                    .url(newUrl)
+                    .build()
 
-            val response = chain.proceed(newRequest)
+                val response = chain.proceed(newRequest)
 
-            if (response.code !in listOf(400, 403)) {
-                return@addInterceptor response
+                if (response.code !in listOf(400, 403)) {
+                    return@addInterceptor response
+                }
+                response.close()
+                clearanceToken = null
+                throw IOException("Open webview to refresh token")
             }
-            response.close()
-            _clearance = null
-            throw IOException("Open webview to refresh token")
-        }
-        .rateLimit(3)
-        .build()
+            .build()
+    }
 
-    private val context: Application by injectLazy()
-    private val handler by lazy { Handler(Looper.getMainLooper()) }
-    private var _clearance: String? = null
+    private var clearanceToken: String? = null
 
-    @SuppressLint("SetJavaScriptEnabled")
-    fun getClearance(): String? {
-        _clearance?.also { return it }
-        val latch = CountDownLatch(1)
-        handler.post {
-            val webview = WebView(context)
-            with(webview.settings) {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                databaseEnabled = true
-                blockNetworkImage = true
-            }
-            webview.webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    view!!.evaluateJavascript("window.localStorage.getItem('clearance')") { clearance ->
-                        webview.stopLoading()
-                        webview.destroy()
-                        _clearance = clearance.takeUnless { it == "null" }?.removeSurrounding("\"")
-                        latch.countDown()
+    // The site stores the token in localStorage once its challenge is passed, which may need
+    // the user to solve it in WebView; a timeout just means there is no token yet.
+    private fun getClearance(call: Call): String? {
+        clearanceToken?.also { return it }
+        clearanceToken = try {
+            runWebViewBlocking(call, timeout = 10.seconds) {
+                blockImages = true
+                onPageFinished {
+                    evaluateJs("window.localStorage.getItem('clearance')") { clearance ->
+                        resolve(clearance.takeUnless { it == "null" }?.removeSurrounding("\""))
                     }
                 }
+                loadUrl("$domainUrl/")
             }
-            webview.loadUrl("$domainUrl/")
+        } catch (_: WebViewTimeoutException) {
+            null
         }
-        latch.await(10, TimeUnit.SECONDS)
-        return _clearance
+        return clearanceToken
     }
 
     private fun getManga(book: Entry) = SManga.create().apply {
@@ -182,7 +148,7 @@ abstract class Koharu :
         thumbnail_url = book.thumbnail.path
     }
 
-    private fun getImagesByMangaData(entry: MangaData, entryId: String, entryKey: String): Pair<ImagesInfo, String> {
+    private suspend fun getImagesByMangaData(entry: MangaData, entryId: String, entryKey: String): Pair<ImagesInfo, String> {
         val data = entry.data
         fun getIPK(
             ori: DataKey?,
@@ -214,14 +180,13 @@ abstract class Koharu :
             else -> "0"
         }
 
-        val imagesResponse = clearanceClient.newCall(GET("$apiBooksUrl/data/$entryId/$entryKey/$id/$public_key/$realQuality", lazyHeaders)).execute()
-        val images = imagesResponse.parseAs<ImagesInfo>() to realQuality
-        return images
+        return clearanceClient.get("$apiBooksUrl/data/$entryId/$entryKey/$id/$public_key/$realQuality", lazyHeaders)
+            .parseAs<ImagesInfo>() to realQuality
     }
 
     // Latest
 
-    override fun latestUpdatesRequest(page: Int) = GET(
+    override suspend fun getLatestUpdates(page: Int): MangasPage = client.get(
         apiBooksUrl.toHttpUrl().newBuilder().apply {
             addQueryParameter("page", page.toString())
 
@@ -235,13 +200,11 @@ abstract class Koharu :
             if (terms.isNotEmpty()) addQueryParameter("s", terms.joinToString(" "))
         }.build(),
         lazyHeaders,
-    )
-
-    override fun latestUpdatesParse(response: Response) = popularMangaParse(response)
+    ).parseAs<Books>().toMangasPage()
 
     // Popular
 
-    override fun popularMangaRequest(page: Int) = GET(
+    override suspend fun getPopularManga(page: Int): MangasPage = client.get(
         apiBooksUrl.toHttpUrl().newBuilder().apply {
             addQueryParameter("sort", "8")
             addQueryParameter("page", page.toString())
@@ -256,34 +219,23 @@ abstract class Koharu :
             if (terms.isNotEmpty()) addQueryParameter("s", terms.joinToString(" "))
         }.build(),
         lazyHeaders,
-    )
+    ).parseAs<Books>().toMangasPage()
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val data = response.parseAs<Books>()
-        return MangasPage(data.entries.map(::getManga), data.page * data.limit < data.total)
-    }
+    private fun Books.toMangasPage() = MangasPage(entries.map(::getManga), page * limit < total)
 
     // Search
 
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> = when {
-        query.startsWith("https://") -> {
-            val url = query.toHttpUrl()
-            val id = "${url.pathSegments[1]}/${url.pathSegments[2]}"
-            fetchSearchManga(page, "$PREFIX_ID_KEY_SEARCH$id", filters)
-        }
-
-        query.startsWith(PREFIX_ID_KEY_SEARCH) -> {
-            val ipk = query.removePrefix(PREFIX_ID_KEY_SEARCH)
-            val response = client.newCall(GET("$apiBooksUrl/detail/$ipk", lazyHeaders)).execute()
-            Observable.just(
-                MangasPage(listOf(mangaDetailsParse(response)), false),
-            )
-        }
-
-        else -> super.fetchSearchManga(page, query, filters)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.pathSegments.size < 3 || url.pathSegments[0] != "g") return null
+        return getMangaDetail("${url.pathSegments[1]}/${url.pathSegments[2]}")
     }
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        if (query.startsWith(PREFIX_ID_KEY_SEARCH)) {
+            val manga = getMangaDetail(query.removePrefix(PREFIX_ID_KEY_SEARCH))
+            return MangasPage(listOf(manga), false)
+        }
+
         val url = apiBooksUrl.toHttpUrl().newBuilder().apply {
             val terms: MutableList<String> = mutableListOf()
             val includedTags: MutableList<Int> = mutableListOf()
@@ -347,118 +299,67 @@ abstract class Koharu :
             addQueryParameter("page", page.toString())
         }.build()
 
-        return GET(url, lazyHeaders)
+        return client.get(url, lazyHeaders).parseAs<Books>().toMangasPage()
     }
 
-    override fun searchMangaParse(response: Response) = popularMangaParse(response)
+    // Filters
 
-    override fun getFilterList(): FilterList {
-        launchIO { fetchTags() }
+    override val supportsFilterFetching = true
 
-        return getFilters()
-    }
+    override suspend fun fetchFilterData(): JsonElement = client.get("$apiBooksUrl/tags/filters", lazyHeaders).parseAs<JsonElement>()
 
-    private val scope = CoroutineScope(Dispatchers.IO)
-
-    private fun launchIO(block: () -> Unit) = scope.launch { block() }
-
-    /**
-     * Fetch the genres from the source to be used in the filters.
-     */
-    private fun fetchTags() {
-        if (tagsFetchAttempts < 3 && !tagsFetched) {
-            try {
-                client.newCall(
-                    GET("$apiBooksUrl/tags/filters", lazyHeaders),
-                ).execute()
-                    .use { it.parseAs<List<Filter>>() }
-                    .also {
-                        tagsFetched = true
-                    }
-                    .takeIf { it.isNotEmpty() }
-                    ?.map { it.toTag() }
-                    ?.also { tags ->
-                        genreList = tags.filterIsInstance<KoharuFilters.Genre>()
-                        femaleList = tags.filterIsInstance<KoharuFilters.Female>()
-                        maleList = tags.filterIsInstance<KoharuFilters.Male>()
-                        artistList = tags.filterIsInstance<KoharuFilters.Artist>()
-                        circleList = tags.filterIsInstance<KoharuFilters.Circle>()
-                        parodyList = tags.filterIsInstance<KoharuFilters.Parody>()
-                        mixedList = tags.filterIsInstance<KoharuFilters.Mixed>()
-                        otherList = tags.filterIsInstance<KoharuFilters.Other>()
-                    }
-            } catch (_: Exception) {
-            } finally {
-                tagsFetchAttempts++
-            }
-        }
-    }
+    override fun getFilterList(data: JsonElement?): FilterList = KoharuFilters.getFilters(data?.parseAs<List<Filter>>()?.map { it.toTag() })
 
     // Details
 
-    override fun mangaDetailsRequest(manga: SManga): Request = GET("$apiBooksUrl/detail/${manga.url}", lazyHeaders)
+    private suspend fun getMangaDetail(url: String): SManga = client.get("$apiBooksUrl/detail/$url", lazyHeaders).parseAs<MangaDetail>().toSMangaWithUrl()
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val mangaDetail = response.parseAs<MangaDetail>()
-        return mangaDetail.toSManga().apply {
-            setUrlWithoutDomain("${mangaDetail.id}/${mangaDetail.key}")
-            title = if (remadd()) mangaDetail.title.shortenTitle() else mangaDetail.title
-        }
+    private fun MangaDetail.toSMangaWithUrl() = toSManga().apply {
+        setUrlWithoutDomain("$id/$key")
+        title = if (remadd()) this@toSMangaWithUrl.title.shortenTitle() else this@toSMangaWithUrl.title
     }
 
     override fun getMangaUrl(manga: SManga) = "$baseUrl/g/${manga.url}"
 
     // Chapter
 
-    override fun chapterListRequest(manga: SManga): Request = GET("$apiBooksUrl/detail/${manga.url}", lazyHeaders)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val manga = response.parseAs<MangaDetail>()
-        return listOf(
-            SChapter.create().apply {
-                name = "Chapter"
-                url = "${manga.id}/${manga.key}"
-                date_upload = (manga.updated_at ?: manga.created_at)
-            },
-        )
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val detail = client.get("$apiBooksUrl/detail/${manga.url}", lazyHeaders).parseAs<MangaDetail>()
+        val chapter = SChapter.create().apply {
+            name = "Chapter"
+            url = "${detail.id}/${detail.key}"
+            date_upload = (detail.updated_at ?: detail.created_at)
+        }
+        return SMangaUpdate(detail.toSMangaWithUrl(), listOf(chapter))
     }
 
     override fun getChapterUrl(chapter: SChapter) = "$baseUrl/g/${chapter.url}"
 
     // Page List
 
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> = clearanceClient.newCall(pageListRequest(chapter))
-        .asObservableSuccess()
-        .map { response ->
-            pageListParse(response)
-        }
-
-    override fun pageListRequest(chapter: SChapter): Request = POST("$apiBooksUrl/detail/${chapter.url}", lazyHeaders)
-
-    override fun pageListParse(response: Response): List<Page> {
-        val mangaData = response.parseAs<MangaData>()
-        val url = response.request.url.toString()
-        val matches = Regex("""/detail/(\d+)/([a-z\d]+)""").find(url)
-        if (matches == null || matches.groupValues.size < 3) return emptyList()
-        val imagesInfo = getImagesByMangaData(mangaData, matches.groupValues[1], matches.groupValues[2])
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val mangaData = clearanceClient.post("$apiBooksUrl/detail/${chapter.url}", lazyHeaders, FormBody.Builder().build())
+            .parseAs<MangaData>()
+        val (entryId, entryKey) = chapter.url.split("/")
+        val imagesInfo = getImagesByMangaData(mangaData, entryId, entryKey)
 
         return imagesInfo.first.entries.mapIndexed { index, image ->
             Page(index, imageUrl = "${imagesInfo.first.base}/${image.path}?w=${imagesInfo.second}")
         }
     }
 
-    override fun imageRequest(page: Page): Request = GET(page.imageUrl!!, lazyHeaders)
+    override fun imageRequest(page: Page): Request = Request.Builder().url(page.imageUrl!!).headers(lazyHeaders).build()
 
-    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
+    override val supportsRelatedMangas = true
 
-    override fun relatedMangaListRequest(manga: SManga) = POST("$apiBooksUrl/detail/${manga.url}", lazyHeaders)
-
-    override suspend fun fetchRelatedMangaList(manga: SManga) = clearanceClient.newCall(relatedMangaListRequest(manga))
-        .awaitSuccess()
-        .use { response ->
-            val data = response.parseAs<MangaData>()
-            data.similar.map(::getManga)
-        }
+    override suspend fun fetchRelatedMangaList(manga: SManga) = clearanceClient.post("$apiBooksUrl/detail/${manga.url}", lazyHeaders, FormBody.Builder().build())
+        .parseAs<MangaData>()
+        .similar.map(::getManga)
 
     // Settings
 
@@ -487,8 +388,6 @@ abstract class Koharu :
                 "Excluding: ${alwaysExcludeTags()}"
         }.also(screen::addPreference)
     }
-
-    private inline fun <reified T> Response.parseAs(): T = json.decodeFromString(body.string())
 
     companion object {
         const val PREFIX_ID_KEY_SEARCH = "id:"

@@ -6,9 +6,9 @@ plugins {
 
 keiyoushi {
     name = "SchaleNetwork"
-    versionCode = 21
+    versionCode = 22
     contentWarning = ContentWarning.NSFW
-    libVersion = "1.4"
+    libVersion = "1.6"
 
     listOf("all", "en", "ja", "zh").forEach {
         source {
