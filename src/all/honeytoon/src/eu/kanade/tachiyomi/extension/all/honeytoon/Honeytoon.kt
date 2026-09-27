@@ -4,63 +4,59 @@ import android.content.SharedPreferences
 import android.widget.Toast
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.lib.i18n.Intl
 import keiyoushi.network.addCookie
+import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
 import kotlinx.serialization.Serializable
 import okhttp3.FormBody
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
 import okio.IOException
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import rx.Observable
 import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
 
 @Source
 abstract class Honeytoon :
-    HttpSource(),
+    KeiSource(),
     ConfigurableSource {
 
-    private val siteLangPath: String get() = if (lang == "pt-BR") "pt" else lang
+    private val langPath: String
+        get() = when (lang) {
+            "en" -> ""
+            "pt-BR" -> "/pt"
+            else -> "/$lang"
+        }
 
-    override val supportsLatest: Boolean = true
+    private val rankingUrl: String get() = "$baseUrl$langPath/ranking"
 
     private val preferences: SharedPreferences by getPreferencesLazy()
 
     private val isAdultContentEnabled: Boolean
         get() = preferences.getBoolean(PREF_ADULT_KEY, false)
 
-    override val client: OkHttpClient = network.client.newBuilder()
-        .addInterceptor { chain ->
-            val fragment = chain.request().url.fragment
-            if (fragment != null && fragment.contains("locked")) {
-                throw IOException(intl["chapter_locked_warning"])
-            }
-            chain.proceed(chain.request())
-        }
-        .addInterceptor(ScrambledImageInterceptor())
+    override fun OkHttpClient.Builder.configureClient() = addInterceptor(ScrambledImageInterceptor())
         .addCookie { listOf("eighteen" to if (isAdultContentEnabled) "1" else "0") }
         .rateLimit(3, 1.seconds)
-        .build()
 
     private val intl = Intl(
         language = lang,
@@ -69,46 +65,15 @@ abstract class Honeytoon :
         classLoader = this::class.java.classLoader!!,
     )
 
-    // Popular
+    override suspend fun getPopularManga(page: Int): MangasPage = mangaParse(client.get(rankingUrl).asJsoup(), ".section.popular")
 
-    override fun popularMangaRequest(page: Int): Request {
-        val langPath = if (lang == "en") "" else "/$siteLangPath"
-        return GET("$baseUrl$langPath/ranking", headers)
-    }
+    override suspend fun getLatestUpdates(page: Int): MangasPage = mangaParse(client.get(rankingUrl).asJsoup(), ".section.new")
 
-    override fun popularMangaParse(response: Response): MangasPage = mangaParse(response, ".section.popular")
-
-    // Latest
-
-    override fun latestUpdatesRequest(page: Int): Request = popularMangaRequest(page)
-
-    override fun latestUpdatesParse(response: Response): MangasPage = mangaParse(response, ".section.new")
-
-    // Search
-
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
-        val url = query.toHttpUrlOrNull()
-        if (url != null) {
-            val url = url.newBuilder()
-                .fragment("deeplink")
-                .build()
-            return Observable.fromCallable {
-                MangasPage(listOf(mangaDetailsParse(client.newCall(GET(url, headers)).execute())), false)
-            }
-        }
-        return super.fetchSearchManga(page, query, filters)
-    }
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val langPath = if (lang == "en") "" else "/$siteLangPath"
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val form = FormBody.Builder()
             .add("query", query)
             .build()
-        return POST("$baseUrl$langPath/api/comic/search", headers, form)
-    }
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        val mangas = response.parseAs<List<SearchDto>>().map {
+        val mangas = client.post("$baseUrl$langPath/api/comic/search", headers, form).parseAs<List<SearchDto>>().map {
             SManga.create().apply {
                 title = Jsoup.parseBodyFragment(it.title).selectFirst("body")!!.ownText()
                 thumbnail_url = "https://pic.honeytoon.com/${it.image}"
@@ -119,14 +84,34 @@ abstract class Honeytoon :
         return MangasPage(mangas, hasNextPage = false)
     }
 
-    // Details
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host) return null
 
-    override fun mangaDetailsParse(response: Response) = SManga.create().apply {
-        val fragment = response.request.url.fragment
-        val document = response.asJsoup()
+        val document = client.get(url).asJsoup()
+        return SManga.create().apply {
+            parseDetails(document)
+            // Only set here: the details page cover is very large, so listing covers are kept otherwise.
+            thumbnail_url = document.selectFirst(".comic-book-img img")?.absUrl("src")
+            setUrlWithoutDomain(document.location())
+        }
+    }
+
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get(getMangaUrl(manga)).asJsoup()
+        return SMangaUpdate(
+            manga = manga.apply { parseDetails(document) },
+            chapters = chapterListParse(document),
+        )
+    }
+
+    private fun SManga.parseDetails(document: Document) {
         title = document.selectFirst("h1")!!.text()
-
-        author = document.select(".comic-book__story-art a")?.joinToString { it.text() }
+        author = document.select(".comic-book__story-art a").joinToString { it.text() }
         description = document.selectFirst(".comic-book__desc")?.text()
         genre = document.select(".comic-book-content a[href*=genre], .comic-tag").joinToString { it.text() }
         status = when {
@@ -134,43 +119,33 @@ abstract class Honeytoon :
             document.selectFirst(".comic-book-content .label__item--dayofpublication") != null -> SManga.ONGOING
             else -> SManga.UNKNOWN
         }
-
-        // The manga page has really large cover images,
-        // so I'm prioritizing covers from the 'popular', 'latest' and 'search'.
-        if (!fragment.isNullOrBlank()) {
-            thumbnail_url = document.selectFirst(".comic-book-img img")?.absUrl("src")
-            setUrlWithoutDomain(document.location())
-        }
     }
 
-    // Chapters
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
-        return document.select(".comic-list-items > a")
-            .mapIndexed { index, element ->
-                val isLocked = element.selectFirst(".lock-ico, .token-ico") != null
-                SChapter.create().apply {
-                    name = buildString {
-                        append(element.selectFirst(".comic-list__title-desc")!!.text())
-                        if (isLocked) {
-                            append(" \uD83D\uDD12")
-                        }
+    private fun chapterListParse(document: Document): List<SChapter> = document.select(".comic-list-items > a")
+        .mapIndexed { index, element ->
+            val isLocked = element.selectFirst(".lock-ico, .token-ico") != null
+            SChapter.create().apply {
+                name = buildString {
+                    append(element.selectFirst(".comic-list__title-desc")!!.text())
+                    if (isLocked) {
+                        append(" \uD83D\uDD12")
                     }
-
-                    date_upload = dateFormat.tryParse(element.selectFirst(".comic-list__title-date")?.text())
-                    setUrlWithoutDomain(
-                        element.absUrl("href")?.takeIf { !isLocked }
-                            ?: (document.location() + "/$index#locked"),
-                    )
                 }
-            }.reversed()
-    }
 
-    // Pages
+                date_upload = dateFormat.tryParse(element.selectFirst(".comic-list__title-date")?.text())
+                setUrlWithoutDomain(
+                    element.absUrl("href").takeIf { !isLocked }
+                        ?: (document.location() + "/$index#locked"),
+                )
+            }
+        }.reversed()
 
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        if (chapter.url.contains("#locked")) {
+            throw IOException(intl["chapter_locked_warning"])
+        }
+
+        val document = client.get(getChapterUrl(chapter)).asJsoup()
         return document.select(".single__item img, .comic-canvas-scramble").mapIndexed { index, element ->
             when (element.tagName()) {
                 "img" -> Page(index, imageUrl = element.imgSrc())
@@ -178,24 +153,11 @@ abstract class Honeytoon :
             }
         }
     }
+
     private fun Element.imgSrc() = when {
         hasAttr("data-src") -> absUrl("data-src")
         else -> absUrl("src")
     }
-
-    override fun pageListRequest(chapter: SChapter): Request {
-        val slug = chapter.url.split("/").filter(String::isNotBlank)
-            .toMutableList()
-            .apply {
-                removeAt(lastIndex)
-            }
-            .last()
-        return GET("$baseUrl${chapter.url}#slug=$slug", headers)
-    }
-
-    override fun imageUrlParse(response: Response): String = ""
-
-    // Settings
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         SwitchPreferenceCompat(screen.context).apply {
@@ -210,9 +172,7 @@ abstract class Honeytoon :
         }.also(screen::addPreference)
     }
 
-    // Utils
-    fun mangaParse(response: Response, cssSelector: String): MangasPage {
-        val document = response.asJsoup()
+    private fun mangaParse(document: Document, cssSelector: String): MangasPage {
         val mangas = document.select("$cssSelector .preview-card__link").map { element ->
             SManga.create().apply {
                 title = element.selectFirst(".preview-card__title")!!.text()
