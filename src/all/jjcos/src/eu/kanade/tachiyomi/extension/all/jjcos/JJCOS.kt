@@ -1,100 +1,97 @@
 package eu.kanade.tachiyomi.extension.all.jjcos
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.tryParse
+import keiyoushi.utils.tryParseDate
+import keiyoushi.utils.tryParseDateTime
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.Request
-import okhttp3.Response
 import org.jsoup.nodes.Document
-import rx.Observable
 import java.io.IOException
-import java.text.SimpleDateFormat
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 @Source
-abstract class JJCOS : HttpSource() {
+abstract class JJCOS : KeiSource() {
 
-    override val supportsLatest = false
+    override val supportsLatest get() = false
 
     // ============================== Popular ==============================
 
-    override fun popularMangaRequest(page: Int): Request = GET(
-        indexUrlBuilder(page = page).build(),
-        headers,
-    )
+    override suspend fun getPopularManga(page: Int): MangasPage {
+        val posts = client.get(indexUrlBuilder(page = page).build()).parseAs<IndexDto>().posts
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val posts = response.parseAs<IndexDto>().posts
-        val page = response.request.url.queryParameter("page")?.toIntOrNull()?.coerceAtLeast(1) ?: 1
-
-        return toMangasPage(posts, page)
+        return toMangasPage(posts, page.coerceAtLeast(1))
     }
 
     // ============================== Latest ===============================
 
-    override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
-
-    override fun latestUpdatesParse(response: Response): MangasPage = throw UnsupportedOperationException()
+    override suspend fun getLatestUpdates(page: Int): MangasPage = throw UnsupportedOperationException()
 
     // ============================== Search ===============================
 
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
-        val mangaPath = parseDeeplinkToMangaPath(query)
-            ?: return super.fetchSearchManga(page, query, filters)
-
-        val manga = SManga.create().apply {
-            url = mangaPath
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        if (query.trim().startsWith("/post/")) {
+            return getMangasByUrl("$baseUrl${query.trim()}".toHttpUrl(), page)
         }
 
-        return fetchMangaDetails(manga).map {
-            MangasPage(
-                mangas = listOf(it),
-                hasNextPage = false,
-            )
-        }
-    }
+        val posts = client.get(indexUrlBuilder(page = page, query = query).build()).parseAs<IndexDto>().posts
+        val trimmedQuery = query.trim()
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = GET(
-        indexUrlBuilder(page = page, query = query).build(),
-        headers,
-    )
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        val posts = response.parseAs<IndexDto>().posts
-        val requestUrl = response.request.url
-        val page = requestUrl.queryParameter("page")?.toIntOrNull()?.coerceAtLeast(1) ?: 1
-        val query = requestUrl.queryParameter("query")?.trim().orEmpty()
-
-        val filteredPosts = if (query.isEmpty()) {
+        val filteredPosts = if (trimmedQuery.isEmpty()) {
             posts
         } else {
-            val normalizedQuery = query.lowercase(Locale.ROOT)
+            val normalizedQuery = trimmedQuery.lowercase(Locale.ROOT)
             posts.filter { post ->
                 post.title.lowercase(Locale.ROOT).contains(normalizedQuery) ||
                     post.content?.lowercase(Locale.ROOT)?.contains(normalizedQuery) == true
             }
         }
 
-        return toMangasPage(filteredPosts, page)
+        return toMangasPage(filteredPosts, page.coerceAtLeast(1))
+    }
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val sourceHost = baseUrl.toHttpUrl().host
+        if (url.host != sourceHost && url.host != "www.$sourceHost") {
+            return null
+        }
+
+        if (url.pathSegments.firstOrNull() != "post") {
+            return null
+        }
+
+        val manga = SManga.create().apply {
+            this.url = normalizePath(url.encodedPath)
+        }
+
+        return fetchMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false).manga
     }
 
     // ============================== Details ==============================
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
+    // Details and the single "Gallery" chapter both come from the post page.
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get(getMangaUrl(manga)).asJsoup()
 
-        return SManga.create().apply {
+        val details = SManga.create().apply {
+            url = manga.url
+
             title = document.selectFirst("h1.fh5co-article-title")
                 ?.text()
                 ?.removeSuffix(" - JJCOS")
@@ -111,42 +108,31 @@ abstract class JJCOS : HttpSource() {
                 .takeIf { it.isNotEmpty() }
 
             status = SManga.COMPLETED
-
-            url = response.request.url.encodedPath
         }
-    }
 
-    // ============================= Chapters ==============================
+        val rawDate = document.selectFirst("meta[property=article:published_time]")?.attr("content")
+            ?: document.selectFirst(".breadcrumb-item.date-overlay")?.text()
+        val dateUpload = DATE_TIME_FORMAT.tryParseDateTime(rawDate).takeIf { it != 0L }
+            ?: DATE_FORMAT.tryParseDate(rawDate)
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
-        val postPath = response.request.url.encodedPath
-        val dateUpload = parseDate(
-            document.selectFirst("meta[property=article:published_time]")?.attr("content")
-                ?: document.selectFirst(".breadcrumb-item.date-overlay")?.text(),
-        )
+        val chapter = SChapter.create().apply {
+            url = manga.url
+            name = "Gallery"
+            date_upload = dateUpload
+        }
 
-        return listOf(
-            SChapter.create().apply {
-                url = normalizePath(postPath)
-                name = "Gallery"
-                date_upload = dateUpload
-            },
-        )
+        return SMangaUpdate(details, listOf(chapter))
     }
 
     // =============================== Pages ===============================
 
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
-        val imageUrls = extractImageUrls(document)
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val document = client.get(getChapterUrl(chapter)).asJsoup()
 
-        return imageUrls.mapIndexed { index, imageUrl ->
+        return extractImageUrls(document).mapIndexed { index, imageUrl ->
             Page(index = index, imageUrl = imageUrl)
         }
     }
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
     // ============================= Utilities =============================
 
@@ -184,34 +170,6 @@ abstract class JJCOS : HttpSource() {
         )
     }
 
-    private fun parseDeeplinkToMangaPath(query: String): String? {
-        val queryUrl = parseQueryAsHttpUrl(query) ?: return null
-        val sourceHost = baseUrl.toHttpUrl().host
-        val pathSegments = queryUrl.pathSegments.filter { it.isNotEmpty() }
-        val encodedPath = queryUrl.encodedPath
-
-        if (queryUrl.host != sourceHost && queryUrl.host != "www.$sourceHost") {
-            return null
-        }
-
-        if (pathSegments.isEmpty()) {
-            return null
-        }
-
-        return if (pathSegments.first() == "post") normalizePath(encodedPath) else null
-    }
-
-    private fun parseQueryAsHttpUrl(query: String): HttpUrl? {
-        val trimmedQuery = query.trim()
-
-        return trimmedQuery.toHttpUrlOrNull()
-            ?: trimmedQuery.replace(" ", "%20").toHttpUrlOrNull()
-            ?: when {
-                trimmedQuery.startsWith("/post/") -> "$baseUrl${trimmedQuery.replace(" ", "%20")}".toHttpUrlOrNull()
-                else -> null
-            }
-    }
-
     private fun linkToEncodedPath(link: String): String {
         val sanitizedLink = link.trim().substringBefore('?').substringBefore('#')
         val absoluteLink = when {
@@ -242,18 +200,10 @@ abstract class JJCOS : HttpSource() {
         }
     }
 
-    private fun parseDate(rawDate: String?): Long = DATE_FORMATS.firstNotNullOfOrNull { format ->
-        format.tryParse(rawDate).takeIf { it != 0L }
-    } ?: 0L
-
     companion object {
         private const val PAGE_SIZE = 20
 
-        private val DATE_FORMATS: List<SimpleDateFormat> by lazy {
-            listOf(
-                SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT),
-                SimpleDateFormat("yyyy-MM-dd", Locale.ROOT),
-            )
-        }
+        private val DATE_TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.ROOT)
+        private val DATE_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.ROOT)
     }
 }
