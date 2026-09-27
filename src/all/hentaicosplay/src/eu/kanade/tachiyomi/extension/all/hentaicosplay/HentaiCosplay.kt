@@ -1,45 +1,67 @@
 package eu.kanade.tachiyomi.extension.all.hentaicosplay
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import eu.kanade.tachiyomi.source.model.UpdateStrategy
-import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
-import okhttp3.Request
-import okhttp3.Response
+import keiyoushi.utils.firstInstanceOrNull
+import keiyoushi.utils.parseAs
+import keiyoushi.utils.toJsonElement
+import keiyoushi.utils.tryParseDate
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.nodes.Document
-import rx.Observable
-import rx.Single
-import rx.schedulers.Schedulers
-import java.lang.UnsupportedOperationException
-import java.text.SimpleDateFormat
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 @Source
-abstract class HentaiCosplay : HttpSource() {
+abstract class HentaiCosplay : KeiSource() {
 
-    override val supportsLatest = true
-
-    override fun headersBuilder() = super.headersBuilder()
-        .set("Referer", "$baseUrl/")
-
+    // Listings are the only place the post date appears; the gallery page does not carry it.
     private val dateCache = mutableMapOf<String, String>()
 
-    override fun fetchPopularManga(page: Int): Observable<MangasPage> {
-        fetchFilters()
-        return super.fetchPopularManga(page)
+    override suspend fun getPopularManga(page: Int): MangasPage = getListing("$baseUrl/ranking/page/$page/")
+
+    override suspend fun getLatestUpdates(page: Int): MangasPage = getListing("$baseUrl/search/page/$page/")
+
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        if (query.isNotEmpty()) {
+            val keyword = query.trim().replace(" ", "+")
+            return getListing("$baseUrl/search/keyword/$keyword/page/$page/")
+        }
+
+        val tag = filters.firstInstanceOrNull<TagFilter>()?.selected.orEmpty()
+        return if (tag.isNotEmpty()) {
+            getListing("$baseUrl${tag}page/$page/")
+        } else {
+            getListing("$baseUrl/search/page/$page/")
+        }
     }
 
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/ranking/page/$page/", headers)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host || !url.encodedPath.startsWith("/image/")) return null
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+        val document = client.get(url).asJsoup()
+        return SManga.create().apply {
+            setUrlWithoutDomain(url.toString())
+            title = document.selectFirst("#title h2")!!.text()
+            thumbnail_url = document.selectFirst("meta[property=og:image]")?.attr("content")
+            parseDetails(document)
+        }
+    }
+
+    private suspend fun getListing(url: String): MangasPage {
+        val document = client.get(url).asJsoup()
 
         return if (document.selectFirst("div.image-list-item") == null) {
             parseMobileListing(document)
@@ -84,142 +106,74 @@ abstract class HentaiCosplay : HttpSource() {
         return MangasPage(entries, hasNextPage)
     }
 
-    override fun fetchLatestUpdates(page: Int): Observable<MangasPage> {
-        fetchFilters()
-        return super.fetchLatestUpdates(page)
+    override val supportsFilterFetching = true
+
+    override suspend fun fetchFilterData(): JsonElement {
+        val document = client.get("$baseUrl/ranking-tag/").asJsoup()
+        return document.select("#tags a").map {
+            TagDto(it.text().replace(tagNumRegex, "").trim(), it.attr("href"))
+        }.toJsonElement()
     }
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/search/page/$page/", headers)
+    override fun getFilterList(data: JsonElement?): FilterList {
+        val tags = data?.parseAs<List<TagDto>>().orEmpty()
+        if (tags.isEmpty()) return FilterList()
 
-    override fun latestUpdatesParse(response: Response) = popularMangaParse(response)
-
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
-        fetchFilters()
-        return super.fetchSearchManga(page, query, filters)
-    }
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        if (query.isNotEmpty()) {
-            val keyword = query.trim().replace(" ", "+")
-            return GET("$baseUrl/search/keyword/$keyword/page/$page/", headers)
-        } else {
-            filters.forEach { filter ->
-                when (filter) {
-                    is TagFilter -> {
-                        if (filter.selected.isNotEmpty()) {
-                            return GET("$baseUrl${filter.selected}page/$page/", headers)
-                        }
-                    }
-
-                    else -> {}
-                }
-            }
-
-            return GET("$baseUrl/search/page/$page/", headers)
-        }
-    }
-
-    override fun searchMangaParse(response: Response) = popularMangaParse(response)
-
-    private var tagCache: List<Pair<String, String>> = emptyList()
-
-    private fun fetchFilters() {
-        if (tagCache.isEmpty()) fetchTags()
-    }
-
-    private fun fetchTags() {
-        Single.fromCallable {
-            runCatching {
-                client.newCall(GET("$baseUrl/ranking-tag/", headers))
-                    .execute().asJsoup()
-                    .run {
-                        tagCache = buildList {
-                            add(Pair("", ""))
-                            select("#tags a").map {
-                                Pair(
-                                    it.text()
-                                        .replace(tagNumRegex, "")
-                                        .trim(),
-                                    it.attr("href"),
-                                ).let(::add)
-                            }
-                        }
-                    }
-            }
-        }
-            .subscribeOn(Schedulers.io())
-            .observeOn(Schedulers.io())
-            .subscribe()
-    }
-
-    private abstract class SelectFilter(
-        name: String,
-        private val options: List<Pair<String, String>>,
-    ) : Filter.Select<String>(
-        name,
-        options.map { it.first }.toTypedArray(),
-    ) {
-        val selected get() = options[state].second
-    }
-
-    private class TagFilter(name: String, options: List<Pair<String, String>>) : SelectFilter(name, options)
-
-    override fun getFilterList(): FilterList = if (tagCache.isEmpty()) {
-        FilterList(Filter.Header("Press reset to attempt to load filters"))
-    } else {
-        FilterList(
+        return FilterList(
             Filter.Header("Ignored with text search"),
             Filter.Separator(),
-            TagFilter("Ranked Tags", tagCache),
+            TagFilter(listOf(TagDto("", "")) + tags),
         )
     }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
+    @Serializable
+    private class TagDto(val name: String, val path: String)
 
-        return SManga.create().apply {
-            genre = document.select("#detail_tag a[href*=/tag/]").eachText().joinToString()
-            update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
-            status = SManga.COMPLETED
+    private class TagFilter(private val tags: List<TagDto>) : Filter.Select<String>("Ranked Tags", tags.map { it.name }.toTypedArray()) {
+        val selected get() = tags[state].path
+    }
+
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        if (fetchDetails) {
+            manga.parseDetails(client.get(getMangaUrl(manga)).asJsoup())
         }
+
+        val chapterList = if (fetchChapters) {
+            listOf(
+                SChapter.create().apply {
+                    name = "Gallery"
+                    url = manga.url.replace("/image/", "/story/")
+                    date_upload = dateFormat.tryParseDate(dateCache[manga.url])
+                },
+            )
+        } else {
+            chapters
+        }
+
+        return SMangaUpdate(manga, chapterList)
     }
 
-    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable.fromCallable {
-        SChapter.create().apply {
-            name = "Gallery"
-            url = manga.url.replace("/image/", "/story/")
-            date_upload = runCatching {
-                dateFormat.parse(dateCache[manga.url]!!)!!.time
-            }.getOrDefault(0L)
-        }.let(::listOf)
+    private fun SManga.parseDetails(document: Document) {
+        genre = document.select("#detail_tag a[href*=/tag/]").eachText().joinToString()
+        update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
+        status = SManga.COMPLETED
     }
 
-    override fun chapterListParse(response: Response) = throw UnsupportedOperationException()
-
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val document = client.get(getChapterUrl(chapter)).asJsoup()
         return document.select("amp-img[src*=upload]:not(.related-thumbnail)")
             .mapIndexed { index, element ->
-                Page(
-                    index = index,
-                    imageUrl = element.attr("src"),
-                )
+                Page(index, imageUrl = element.attr("src"))
             }
     }
 
-    override fun imageUrlParse(response: Response) = imageUrlParse(response.asJsoup())
-
-    private fun imageUrlParse(document: Document): String = document.selectFirst("#display_image_detail img, #detail_list img")!!
-        .absUrl("src")
-        .replace("http://", "https://")
-        .replace(hdRegex, "/")
-
     companion object {
         private val tagNumRegex = Regex("""(\(\d+\))""")
-        private val pagesRegex = Regex("""\d+/(\d+)${'$'}""")
-        private val hdRegex = Regex("""(/p=\d+x?\d+?/)""")
-        private val dateFormat by lazy {
-            SimpleDateFormat("yyyy/MM/dd", Locale.ENGLISH)
-        }
+        private val dateFormat = DateTimeFormatter.ofPattern("yyyy/MM/dd", Locale.ENGLISH)
     }
 }
