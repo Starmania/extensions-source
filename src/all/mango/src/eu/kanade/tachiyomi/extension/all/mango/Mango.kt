@@ -4,9 +4,7 @@ import android.content.SharedPreferences
 import android.text.InputType
 import android.widget.Toast
 import eu.kanade.tachiyomi.AppInfo
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
-import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.UnmeteredSource
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -14,10 +12,12 @@ import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import info.debatty.java.stringsimilarity.JaroWinkler
 import info.debatty.java.stringsimilarity.Levenshtein
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.array
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.int
@@ -28,16 +28,17 @@ import keiyoushi.utils.string
 import kotlinx.serialization.json.JsonObject
 import okhttp3.Dns
 import okhttp3.FormBody
+import okhttp3.Headers
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import okhttp3.Response
-import rx.Observable
 import java.io.IOException
 
 @Source
 abstract class Mango :
-    HttpSource(),
+    KeiSource(),
     ConfigurableSource,
     UnmeteredSource {
 
@@ -46,10 +47,10 @@ abstract class Mango :
     private val preferences: SharedPreferences by getPreferencesLazy()
 
     // ============================== Popular ==============================
-    override fun popularMangaRequest(page: Int): Request = GET("$apiUrl/library?depth=0", headersBuilder().build())
-
     // Our popular manga are just our library of manga
-    override fun popularMangaParse(response: Response): MangasPage {
+    override suspend fun getPopularManga(page: Int): MangasPage = parseLibrary(client.get("$apiUrl/library?depth=0"))
+
+    private fun parseLibrary(response: Response): MangasPage {
         val result = try {
             response.parseAs<JsonObject>()
         } catch (_: Exception) {
@@ -72,22 +73,13 @@ abstract class Mango :
     }
 
     // ============================== Latest ===============================
-    override fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
-    override fun latestUpdatesParse(response: Response): MangasPage = throw UnsupportedOperationException()
+    override suspend fun getLatestUpdates(page: Int): MangasPage = throw UnsupportedOperationException()
 
     // ============================== Search ===============================
-    // Default is to just return the whole library for searching
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = popularMangaRequest(1)
-
-    // Overridden fetch so that we use our overloaded method instead
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> = client.newCall(searchMangaRequest(page, query, filters))
-        .asObservableSuccess()
-        .map { response -> searchMangaParse(response, query) }
-
     // Here the best we can do is just match manga based on their titles
-    private fun searchMangaParse(response: Response, query: String): MangasPage {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val queryLower = query.lowercase()
-        val mangas = popularMangaParse(response).mangas
+        val mangas = getPopularManga(1).mangas
         val exactMatch = mangas.firstOrNull { it.title.lowercase() == queryLower }
         if (exactMatch != null) {
             return MangasPage(listOf(exactMatch), false)
@@ -115,41 +107,41 @@ abstract class Mango :
         return MangasPage(combinedResults, false)
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = throw UnsupportedOperationException()
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != basePath.toHttpUrl().host || url.pathSegments.firstOrNull() != "book") return null
+        val id = url.pathSegments.getOrNull(1) ?: return null
+        return parseTitle(client.get("$apiUrl/book/$id")).toSManga()
+    }
 
     // ============================== Details ==============================
-    override fun mangaDetailsRequest(manga: SManga): Request = GET(apiUrl + manga.url, headers)
+    // Details and chapters come from the same title object
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val result = parseTitle(client.get(apiUrl + manga.url + "?sort=auto"))
+        return SMangaUpdate(result.toSManga(), listChapters(result))
+    }
+
+    private fun parseTitle(response: Response): JsonObject = try {
+        response.parseAs<JsonObject>()
+    } catch (_: Exception) {
+        apiCookies = ""
+        throw Exception("Login Likely Failed. Try Refreshing.")
+    }
 
     // This will just return the same thing as the main library endpoint
-    override fun mangaDetailsParse(response: Response): SManga {
-        val result = try {
-            response.parseAs<JsonObject>()
-        } catch (_: Exception) {
-            apiCookies = ""
-            throw Exception("Login Likely Failed. Try Refreshing.")
-        }
-        return SManga.create().apply {
-            url = "/book/" + result["id"]!!.string
-            title = result["display_name"]!!.string
-            thumbnail_url = basePath + result["cover_url"]!!.string
-        }
+    private fun JsonObject.toSManga(): SManga = SManga.create().apply {
+        url = "/book/" + this@toSManga["id"]!!.string
+        title = this@toSManga["display_name"]!!.string
+        thumbnail_url = basePath + this@toSManga["cover_url"]!!.string
     }
 
     // ============================= Chapters ==============================
-    override fun chapterListRequest(manga: SManga): Request = GET(apiUrl + manga.url + "?sort=auto", headers)
-
-    // The chapter url will contain how many pages the chapter contains for our page list endpoint
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val result = try {
-            response.parseAs<JsonObject>()
-        } catch (_: Exception) {
-            apiCookies = ""
-            throw Exception("Login Likely Failed. Try Refreshing.")
-        }
-        return listChapters(result)
-    }
-
-    // Helper function for listing chapters and chapters in nested titles recursively
+    // The chapter url will contain how many pages the chapter contains for our page list endpoint.
+    // Nested titles are listed recursively.
     private fun listChapters(titleObj: JsonObject): List<SChapter> {
         val chapters = mutableListOf<SChapter>()
         val topChapters = titleObj["entries"]?.array?.map {
@@ -174,28 +166,17 @@ abstract class Mango :
     }
 
     // =============================== Pages ===============================
-    override fun pageListRequest(chapter: SChapter): Request = throw UnsupportedOperationException()
-
-    // Overridden fetch so that we use our overloaded method instead
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val splitUrl = chapter.url.split("/").toMutableList()
         val numPages = splitUrl.removeAt(splitUrl.size - 2).toInt()
         val baseUrlChapter = splitUrl.joinToString("/")
-        val pages = (1..numPages).map { i ->
+        return (1..numPages).map { i ->
             Page(
                 index = i,
                 imageUrl = "$apiUrl$baseUrlChapter$i",
             )
         }
-        return Observable.just(pages)
     }
-
-    override fun pageListParse(response: Response): List<Page> = throw UnsupportedOperationException()
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
-
-    // ============================== Filters ==============================
-    override fun getFilterList(): FilterList = FilterList()
 
     // ============================= Utilities =============================
     private var apiCookies: String = ""
@@ -221,14 +202,14 @@ abstract class Mango :
 
     private val apiUrl: String get() = "$basePath/api"
 
-    override fun headersBuilder() = super.headersBuilder()
-        .add("User-Agent", "Tachiyomi Mango v${AppInfo.getVersionName()}")
+    override fun Headers.Builder.configureHeaders() = apply {
+        add("User-Agent", "Tachiyomi Mango v${AppInfo.getVersionName()}")
+    }
 
-    override val client: OkHttpClient =
-        network.client.newBuilder()
-            .dns(Dns.SYSTEM)
-            .addInterceptor { authIntercept(it) }
-            .build()
+    override fun OkHttpClient.Builder.configureClient() = apply {
+        dns(Dns.SYSTEM)
+        addInterceptor { authIntercept(it) }
+    }
 
     private fun authIntercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
