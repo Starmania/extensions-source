@@ -7,7 +7,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 
 @Serializable
-data class ChapterDto(
+class ChapterDto(
     val id: String,
     val title: String,
     val number: Float,
