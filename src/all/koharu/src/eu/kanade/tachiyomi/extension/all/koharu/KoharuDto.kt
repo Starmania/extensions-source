@@ -53,7 +53,7 @@ class MangaDetail(
     val title: String,
     val key: String,
     val created_at: Long = 0L,
-    val updated_at: Long?,
+    val updated_at: Long? = null,
     val thumbnails: Thumbnails,
     val tags: List<Tag> = emptyList(),
 ) {
