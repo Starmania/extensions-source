@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Commit Strip"
-    versionCode = 5
+    versionCode = 0
     contentWarning = ContentWarning.SAFE
     libVersion = "1.6"
 
