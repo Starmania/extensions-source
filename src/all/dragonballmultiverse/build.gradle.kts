@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Dragon Ball Multiverse"
-    versionCode = 9
+    versionCode = 0
     contentWarning = ContentWarning.SAFE
     libVersion = "1.6"
 
