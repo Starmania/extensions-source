@@ -8,13 +8,13 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.annotation.Source
-import keiyoushi.utils.asJsoup
-import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.parseAs
-import kotlinx.serialization.json.JsonObject
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
+
+const val API_URL = "https://api.sacachispa.site/api"
+const val CDN_URL = "https://cdn.sacachispa.site"
 
 @Source
 abstract class Sacachispa : HttpSource() {
@@ -26,13 +26,11 @@ abstract class Sacachispa : HttpSource() {
 
     // ============================== Popular ==============================
 
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/api/series?page=$page&pageSize=24", headers)
+    override fun popularMangaRequest(page: Int): Request = searchMangaRequest(page, "", FilterList())
 
     override fun popularMangaParse(response: Response): MangasPage {
-        val dto = response.parseAs<SeriesResponseDto>()
-        val mangas = dto.items.map { it.toSManga() }
-        val hasNext = dto.page < dto.totalPages
-        return MangasPage(mangas, hasNext)
+        val dto = response.parseAs<PaginatedDto<MangaListDto>>()
+        return MangasPage(dto.data.map { it.toSManga() }, dto.pagination.page < dto.pagination.pages)
     }
 
     // ============================== Latest ===============================
@@ -43,10 +41,10 @@ abstract class Sacachispa : HttpSource() {
     // ============================== Search ===============================
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = "$baseUrl/api/series".toHttpUrl().newBuilder()
+        val url = "$API_URL/manga".toHttpUrl().newBuilder()
             .addQueryParameter("page", page.toString())
-            .addQueryParameter("pageSize", "24")
-            .addQueryParameter("search", query)
+            .addQueryParameter("limit", "24")
+            .apply { if (query.isNotBlank()) addQueryParameter("title", query) }
             .build()
         return GET(url, headers)
     }
@@ -55,58 +53,38 @@ abstract class Sacachispa : HttpSource() {
 
     // ============================== Details ==============================
 
-    override fun mangaDetailsRequest(manga: SManga): Request = GET("$baseUrl/series/${manga.url}", headers)
+    // The API resolves a slug as well as a UUID, so library entries saved by the old site keep working.
+    override fun mangaDetailsRequest(manga: SManga): Request = GET("$API_URL/manga/${manga.url}", headers)
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
-        return SManga.create().apply {
-            title = document.selectFirst("h1.font-heading")!!.text()
-            description = document.selectFirst("p.max-w-2xl")?.text()
-            author = document.selectFirst("span:contains(Author:)")?.text()?.substringAfter("Author: ")
-            artist = document.selectFirst("span:contains(Artist:)")?.text()?.substringAfter("Artist: ")
+    override fun mangaDetailsParse(response: Response): SManga = response.parseAs<ResponseDto<MangaDto>>().data.toSManga()
 
-            val badges = document.select("span[data-slot=badge]")
-            val statusText = badges.map { it.text().lowercase() }.firstOrNull { it == "ongoing" || it == "completed" }
-            status = parseStatus(statusText)
-
-            genre = document.select("a[href^=/browse?genre=] span").joinToString { it.text() }
-            thumbnail_url = document.selectFirst("div.aspect-\\[2\\/3\\] img")?.absUrl("src")
-        }
-    }
-
-    private fun parseStatus(status: String?): Int = when (status?.lowercase()) {
-        "ongoing" -> SManga.ONGOING
-        "completed" -> SManga.COMPLETED
-        else -> SManga.UNKNOWN
-    }
+    override fun getMangaUrl(manga: SManga): String = "$baseUrl/manga/${manga.url}/${manga.url}"
 
     // ============================= Chapters ==============================
 
     override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
 
+    // Releases can only be filtered by manga UUID, which the slug-based url does not carry.
     override fun chapterListParse(response: Response): List<SChapter> {
-        val dto = response.extractNextJs<RscChaptersDto> {
-            it is JsonObject && "chapters" in it
-        } ?: return emptyList()
-
-        val slug = response.request.url.pathSegments.last { it.isNotEmpty() }
-
-        return dto.chapters
-            .map { it.toSChapter(slug) }
+        val mangaId = response.parseAs<ResponseDto<MangaDto>>().data.id
+        val url = "$API_URL/releases".toHttpUrl().newBuilder()
+            .addQueryParameter("mangaId", mangaId)
+            .addQueryParameter("limit", "500")
+            .build()
+        return client.newCall(GET(url, headers)).execute()
+            .parseAs<PaginatedDto<ReleaseDto>>().data
+            .filterNot { it.chapter.patreonOnly }
+            .map { it.toSChapter() }
             .sortedByDescending { it.chapter_number }
     }
 
+    override fun getChapterUrl(chapter: SChapter): String = "$baseUrl/read/${chapter.url}"
+
     // =============================== Pages ===============================
 
-    override fun pageListParse(response: Response): List<Page> {
-        val dto = response.extractNextJs<RscPageDto> { element ->
-            if (element !is JsonObject) return@extractNextJs false
-            val chapter = element["chapter"] as? JsonObject
-            chapter != null && "pages" in chapter
-        } ?: return emptyList()
+    override fun pageListRequest(chapter: SChapter): Request = GET("$API_URL/releases/${chapter.url}/pages", headers)
 
-        return dto.chapter.toPageList()
-    }
+    override fun pageListParse(response: Response): List<Page> = response.parseAs<ResponseDto<PagesDto>>().data.toPageList()
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 }
