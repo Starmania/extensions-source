@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Danbooru"
-    versionCode = 1
+    versionCode = 0
     contentWarning = ContentWarning.NSFW
     libVersion = "1.6"
 
