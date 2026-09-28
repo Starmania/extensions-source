@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Junmeitu"
-    versionCode = 8
+    versionCode = 0
     contentWarning = ContentWarning.NSFW
     libVersion = "1.6"
 
