@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "SchaleNetwork"
-    versionCode = 22
+    versionCode = 0
     contentWarning = ContentWarning.NSFW
     libVersion = "1.6"
 
