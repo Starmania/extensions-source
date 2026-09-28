@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "CosplayTele"
-    versionCode = 6
+    versionCode = 0
     contentWarning = ContentWarning.NSFW
     libVersion = "1.6"
 
