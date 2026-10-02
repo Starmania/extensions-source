@@ -11,7 +11,7 @@ on:
 permissions: {}
 
 env:
-  SEED_TASKS: ":src:id:komikindo:assembleRelease :src:all:mangadex:assembleRelease"
+  SEED_TASKS: ":src:id:komikindo:assembleRelease :src:all:mangadex:assembleRelease :core:lintRelease"
 
 jobs:
   seed:
