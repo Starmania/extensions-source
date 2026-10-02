@@ -70,6 +70,48 @@ jobs:
         run: |
           python ./.github/scripts/generate-build-matrices.py "$BASE_SHA"
 
+  shared:
+    name: Populate shared modules cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          java-version: 25
+          distribution: temurin
+
+      # The only job that writes the Gradle cache: every other job (including PR checks)
+      # restores what this one saved, so it has to cover everything they can reuse.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: false
+
+      - name: Build and lint shared modules
+        run: |
+          MODULES=(":core")
+          for dir in lib lib-multisrc; do
+            for build_file in "$dir"/*/build.gradle.kts; do
+              MODULES+=(":${dir}:$(basename "$(dirname "$build_file")")")
+            done
+          done
+
+          # One extension, so extension-only dependencies and tooling are cached too
+          extension=$(find src -mindepth 2 -maxdepth 2 -type d | sort | head -n 1)
+          MODULES+=(":${extension//\//:}")
+
+          TASKS=()
+          for module in "${MODULES[@]}"; do
+            TASKS+=("${module}:assembleRelease" "${module}:lintRelease")
+          done
+          ./gradlew "${TASKS[@]}"
+
   build:
     name: Build extensions (${{ matrix.chunk.number }})
     needs: prepare
@@ -93,7 +135,7 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
-          cache-read-only: ${{ matrix.chunk.number > 1 }}
+          cache-read-only: true
 
       - name: Prepare signing key
         run: |
