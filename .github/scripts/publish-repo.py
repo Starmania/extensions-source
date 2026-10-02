@@ -3,6 +3,7 @@ import hashlib
 import html
 import json
 import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -18,8 +19,7 @@ ARTIFACTS_DIR = Path.home() / "apk-artifacts"
 # The checked-out `repo` branch we publish into (the working directory).
 REPO_DIR = Path.cwd()
 
-ICON_BASE_URL = "https://cdn.jsdelivr.net/gh/keiyoushi/extensions-source@main"
-RELEASE_BASE_URL = f"https://github.com/{REPO_NAME}/releases/download"
+EXTENSION_PREFIX = "eu.kanade.tachiyomi.extension"
 ASSET_LIMIT = 495  # Actual limit is 1000 but we upload 2 items per extension.
 UPLOAD_CHUNK_SIZE = 80
 UPLOAD_CHUNK_INTERVAL = 30
@@ -31,6 +31,30 @@ current_sha_short = current_sha[:7]
 # nothing is carried over from the published index. This is what drops extensions deleted
 # from the source tree, which a diff against the empty tree can't see.
 full_rebuild = sys.argv[3] == "true"
+
+# Set by the contributor build (build_fork.yml): a fork publishes into its own `repo` branch
+# and releases, and each of its branches owns the index entries of one channel. A branch is
+# always built in full, so its build output replaces every entry of its channel.
+channel = os.getenv("KEI_CHANNEL")
+if channel:
+    SOURCE_REPO = os.environ["GITHUB_REPOSITORY"]
+    REPO_NAME = SOURCE_REPO
+    # A branch can add icons, and it can be deleted: pin them to the commit.
+    ICON_BASE_URL = f"https://cdn.jsdelivr.net/gh/{SOURCE_REPO}@{current_sha}"
+else:
+    SOURCE_REPO = "keiyoushi/extensions-source"
+    ICON_BASE_URL = f"https://cdn.jsdelivr.net/gh/{SOURCE_REPO}@main"
+RELEASE_BASE_URL = f"https://github.com/{REPO_NAME}/releases/download"
+
+
+def is_replaced(package_name: str) -> bool:
+    """Whether a published package is dropped in favor of the build output."""
+    if channel:
+        return package_name.startswith(f"{EXTENSION_PREFIX}.{channel}.")
+    return full_rebuild or any(
+        package_name.endswith(f".{module}") for module in to_delete
+    )
+
 
 with REPO_DIR.joinpath("index.json").open() as f:
     remote_proto = json_format.Parse(f.read(), index_pb2.Index())
@@ -49,8 +73,7 @@ else:
 updated_release_assets = {
     package_name: assets
     for package_name, assets in release_assets.items()
-    if not full_rebuild
-    and not any(package_name.endswith(f".{module}") for module in to_delete)
+    if not is_replaced(package_name)
 }
 
 # Build index entries for the freshly built apks. Each extension's metadata comes from the
@@ -182,22 +205,30 @@ final_extensions = []
 final_extensions.extend(
     ext
     for ext in remote_proto.extensionList.extensions
-    if not full_rebuild
-    and not any(ext.packageName.endswith(f".{module}") for module in to_delete)
+    if not is_replaced(ext.packageName)
 )
 final_extensions.extend(ext for ext, _, _, _, _ in new_extensions)
 final_extensions.sort(key=lambda ext: ext.packageName)
 
-index = index_pb2.Index(
-    name="Keiyoushi",
-    badgeLabel="KEI",
-    signingKey="9add655a78e96c4ec7a53ef89dccb557cb5d767489fac5e785d671a5a75d4da2",
-    contact=index_pb2.Contact(
-        website="https://keiyoushi.github.io",
-        discord="https://discord.gg/3FbCpdKbdY",
-    ),
-    extensionList=index_pb2.ExtensionList(extensions=final_extensions),
-)
+if channel:
+    index = index_pb2.Index(
+        name=SOURCE_REPO,
+        badgeLabel="FORK",
+        signingKey=os.environ["SIGNING_KEY_FINGERPRINT"],
+        contact=index_pb2.Contact(website=f"https://github.com/{SOURCE_REPO}"),
+        extensionList=index_pb2.ExtensionList(extensions=final_extensions),
+    )
+else:
+    index = index_pb2.Index(
+        name="Keiyoushi",
+        badgeLabel="KEI",
+        signingKey="9add655a78e96c4ec7a53ef89dccb557cb5d767489fac5e785d671a5a75d4da2",
+        contact=index_pb2.Contact(
+            website="https://keiyoushi.github.io",
+            discord="https://discord.gg/3FbCpdKbdY",
+        ),
+        extensionList=index_pb2.ExtensionList(extensions=final_extensions),
+    )
 
 with REPO_DIR.joinpath("index.json").open("w", encoding="utf-8") as f:
     f.write(
@@ -255,7 +286,7 @@ def create_release(tag: str):
         "--title",
         f"Repository Update {tag}",
         "--notes",
-        f"Automated update from keiyoushi/extensions-source@{current_sha}",
+        f"Automated update from {SOURCE_REPO}@{current_sha}",
     )
 
 

@@ -92,6 +92,7 @@ or fix them directly by submitting a Pull Request.
       - [Set up your proxy server](#set-up-your-proxy-server)
       - [OkHttp proxy setup](#okhttp-proxy-setup)
   - [Building](#building)
+    - [Publishing your branches from your fork](#publishing-your-branches-from-your-fork)
   - [Submitting the changes](#submitting-the-changes)
     - [Pull Request checklist](#pull-request-checklist)
 
@@ -1988,6 +1989,30 @@ Run lint directly on shared modules, such as
 `./gradlew :lib-multisrc:<theme>:lintRelease` or `./gradlew :lib:<name>:lintRelease`.
 Linting only an extension that depends on a shared module does not reliably report issues in the
 dependency itself. If you explicitly changed `core/`, run `./gradlew :core:lintRelease` as well.
+
+### Publishing your branches from your fork
+
+Your fork can build the extensions each of your branches changes and publish them to an extension
+repo of its own, so you can install them from the app without building locally. This is done by
+the `Contributor build` workflow, which only runs in forks.
+
+To set it up:
+
+1. Enable GitHub Actions in your fork.
+2. Create a keystore and add it to the fork's Actions secrets: `SIGNING_KEY` (the keystore,
+   base64-encoded), `ALIAS`, `KEY_STORE_PASSWORD` and `KEY_PASSWORD`. Without them the branch is
+   still built, but nothing is published.
+3. Push a branch, then add `https://github.com/<you>/extensions-source/raw/repo/index.pb` as an
+   extension repo in the app.
+
+Every push builds what the branch changes compared to upstream `main` and publishes it to the
+`repo` branch and the releases of your fork. Deleting the branch removes its extensions from the
+repo.
+
+These builds get their own package name and source IDs, different for each branch, so they
+install next to the official extension, and next to the builds of your other branches, instead of
+replacing them. The branch name is appended to the extension name to tell them apart. Since the
+source IDs differ, entries from your library are not attached to these sources.
 
 ## Submitting the changes
 

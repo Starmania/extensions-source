@@ -52,6 +52,12 @@ class ExtensionPlugin : Plugin<Project> {
         val dirSuffix = "${project.parent?.name}.${project.name}"
         val pkgName = keiyoushi.pkgName.orElse(dirSuffix)
 
+        val channel = providers.environmentVariable("KEI_CHANNEL")
+        val appIdSuffix = channel.zip(pkgName) { prefix, pkg -> "$prefix.$pkg" }.orElse(pkgName)
+        val displayName = providers.environmentVariable("KEI_CHANNEL_LABEL")
+            .zip(keiyoushi.name) { label, name -> "$name ($label)" }
+            .orElse(keiyoushi.name)
+
         android {
             namespace = "eu.kanade.tachiyomi.extension"
 
@@ -152,7 +158,7 @@ class ExtensionPlugin : Plugin<Project> {
 
         val manifestTask = tasks.register<GenerateManifestTask>("generateExtensionManifest") {
             this.filters.set(deeplinksProvider)
-            this.extensionName.set(keiyoushi.name)
+            this.extensionName.set(displayName)
             this.contentWarning.set(keiyoushi.contentWarning)
             this.extensionLib.set(keiyoushi.libVersion)
         }
@@ -180,7 +186,7 @@ class ExtensionPlugin : Plugin<Project> {
             val bootClasspath = sdkComponents.bootClasspath
 
             finalizeDsl {
-                val suffix = pkgName.get()
+                val suffix = appIdSuffix.get()
                 check(APPLICATION_ID_SUFFIX_REGEX.matches(suffix)) {
                     "pkgName '$suffix' is invalid. Expected dot-separated alphanumeric segments (e.g. '$dirSuffix')."
                 }
@@ -193,7 +199,7 @@ class ExtensionPlugin : Plugin<Project> {
                 variant.sources.manifests.addStaticManifestFile("AndroidManifest.xml")
                 variant.sources.manifests.addGeneratedManifestFile(manifestTask) { it.outputFile }
 
-                val filenameProvider = versionNameProvider.map { "tachiyomi-${pkgName.get()}-v$it" }
+                val filenameProvider = versionNameProvider.map { "tachiyomi-${appIdSuffix.get()}-v$it" }
 
                 variant.outputs.forEach { output ->
                     output.versionCode.set(androidVersionCodeProvider)
@@ -258,11 +264,12 @@ class ExtensionPlugin : Plugin<Project> {
                 val lang = spec.lang.get()
                 val baseUrl = spec.resolvedBaseUrl.get().toMetadata()
 
-                val id = spec.id.orElse(
+                val officialId = spec.id.orElse(
                     providers.provider {
                         computeSourceId(name, lang, spec.versionId.orElse(1).get())
                     },
                 ).get()
+                val id = channel.map { hashToSourceId("$officialId/$it") }.getOrElse(officialId)
                 ResolvedSource(name, lang, id, baseUrl)
             }
             val translationsFile = project(":core").projectDir.resolve("translations/strings.json")
@@ -274,7 +281,7 @@ class ExtensionPlugin : Plugin<Project> {
                 inputs.file(translationsFile)
             }
 
-            val packageName = "eu.kanade.tachiyomi.extension.${pkgName.get()}"
+            val packageName = "eu.kanade.tachiyomi.extension.${appIdSuffix.get()}"
             val sourceInfos = resolvedSources.map { source ->
                 SourceMetadata(
                     id = source.id,
@@ -296,7 +303,7 @@ class ExtensionPlugin : Plugin<Project> {
                         module = dirSuffix,
                         theme = keiyoushi.theme.orNull,
                         packageName = packageName,
-                        name = extName,
+                        name = displayName.get(),
                         versionCode = code,
                         versionName = name,
                         extensionLib = libVersionValue,
@@ -320,8 +327,9 @@ class ExtensionPlugin : Plugin<Project> {
 
 private val APPLICATION_ID_SUFFIX_REGEX = Regex("""^\w+(\.\w+)+$""")
 
-private fun computeSourceId(name: String, lang: String, versionId: Int = 1): Long {
-    val key = "${name.lowercase()}/$lang/$versionId"
+private fun computeSourceId(name: String, lang: String, versionId: Int = 1): Long = hashToSourceId("${name.lowercase()}/$lang/$versionId")
+
+private fun hashToSourceId(key: String): Long {
     val bytes = java.security.MessageDigest.getInstance("MD5").digest(key.toByteArray())
     return (0..7).map { bytes[it].toLong() and 0xff }
         .reduce { acc, l -> (acc shl 8) or l } and Long.MAX_VALUE
