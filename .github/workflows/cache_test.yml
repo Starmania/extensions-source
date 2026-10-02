@@ -1,0 +1,76 @@
+name: Cache test
+
+# Temporary experiment, fork only: does running lint in the cache-writing job
+# let read-only PR-like jobs restore lint outputs from the Gradle build cache?
+
+on:
+  push:
+    branches:
+      - 'ci/cache-test-*'
+
+permissions: {}
+
+env:
+  SEED_TASKS: ":src:id:komikindo:assembleRelease :src:all:mangadex:assembleRelease"
+
+jobs:
+  seed:
+    name: Seed cache (simulates main chunk 1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          java-version: 25
+          distribution: temurin
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: false
+
+      - name: Build seed modules
+        run: |
+          # shellcheck disable=SC2086
+          ./gradlew $SEED_TASKS
+
+  pr:
+    name: PR-like build (${{ matrix.module }})
+    needs: seed
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - ":src:vi:damconuong"
+          - ":src:en:anisascans"
+          - ":src:en:bookwalker"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          java-version: 25
+          distribution: temurin
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-read-only: true
+
+      - name: Build and lint
+        env:
+          MODULE: ${{ matrix.module }}
+        run: |
+          ./gradlew "${MODULE}:assembleRelease" "${MODULE}:lintRelease"
