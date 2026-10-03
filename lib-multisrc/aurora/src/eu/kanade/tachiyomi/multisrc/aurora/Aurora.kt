@@ -29,7 +29,9 @@ abstract class Aurora : KeiSource() {
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(3, 1.seconds)
         .addCookie("mnx_adulto" to "1")
 
-    override fun Headers.Builder.configureHeaders() = set("Sec-Fetch-Dest", "document")
+    // The site's WAF rejects a navigation request (Sec-Fetch-Dest/Mode) that does not accept HTML.
+    override fun Headers.Builder.configureHeaders() = set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+        .set("Sec-Fetch-Dest", "document")
         .set("Sec-Fetch-Mode", "navigate")
         .set("Sec-Fetch-Site", "none")
         .set("Sec-Fetch-User", "?1")
