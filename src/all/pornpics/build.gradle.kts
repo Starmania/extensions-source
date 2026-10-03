@@ -6,9 +6,9 @@ plugins {
 
 keiyoushi {
     name = "PornPics"
-    versionCode = 3
+    versionCode = 4
     contentWarning = ContentWarning.NSFW
-    libVersion = "1.4"
+    libVersion = "1.6"
 
     listOf("en", "zh").forEach { langCode ->
         source {
