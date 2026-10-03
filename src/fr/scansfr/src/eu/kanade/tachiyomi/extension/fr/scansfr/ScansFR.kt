@@ -4,45 +4,36 @@ import android.content.SharedPreferences
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
-import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.network.post
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
-import rx.Observable
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.TimeZone
 import java.util.UUID
+import kotlin.time.Instant
 
 @Source
 abstract class ScansFR :
-    HttpSource(),
+    KeiSource(),
     ConfigurableSource {
 
-    override val supportsLatest = true
-
     private val apiUrl = "https://api.scansfr.com"
-
-    override val client = network.client.newBuilder()
-        .build()
-
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
 
     private val imageHeaders = headersBuilder()
         .set("User-Agent", "Mozilla/5.0 (Android 13; Mobile; rv:125.0) Gecko/125.0 Firefox/125.0")
@@ -66,25 +57,19 @@ abstract class ScansFR :
 
     // ============================== Popular ===============================
 
-    override fun popularMangaRequest(page: Int): Request = GET("$apiUrl/api/v1/mangas?page=$page&sort=popular${nsfwQueryParam()}", headers)
-
-    override fun popularMangaParse(response: Response): MangasPage {
-        val data = response.parseAs<MangaListDto>()
-        return MangasPage(
-            data.mangas.map { it.toSManga() },
-            data.page < data.totalPages,
-        )
-    }
+    override suspend fun getPopularManga(page: Int): MangasPage = client.get("$apiUrl/api/v1/mangas?page=$page&sort=popular${nsfwQueryParam()}")
+        .parseAs<MangaListDto>()
+        .toMangasPage()
 
     // =============================== Latest ===============================
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$apiUrl/api/v1/mangas?page=$page&sort=updated${nsfwQueryParam()}", headers)
-
-    override fun latestUpdatesParse(response: Response) = popularMangaParse(response)
+    override suspend fun getLatestUpdates(page: Int): MangasPage = client.get("$apiUrl/api/v1/mangas?page=$page&sort=updated${nsfwQueryParam()}")
+        .parseAs<MangaListDto>()
+        .toMangasPage()
 
     // =============================== Search ===============================
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val url = "$apiUrl/api/v1/mangas".toHttpUrl().newBuilder().apply {
             addQueryParameter("page", page.toString())
             if (query.isNotBlank()) addQueryParameter("search", query)
@@ -98,20 +83,9 @@ abstract class ScansFR :
                 }
             }
         }.build()
-        return GET("$url${nsfwQueryParam()}", headers)
-    }
-
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
         val hasChaptersOnly = filters.firstInstanceOrNull<HasChaptersFilter>()?.state == true
-        return client.newCall(searchMangaRequest(page, query, filters))
-            .asObservableSuccess()
-            .map { response -> parseSearchManga(response, query, hasChaptersOnly) }
-    }
 
-    override fun searchMangaParse(response: Response): MangasPage = parseSearchManga(response, query = "", hasChaptersOnly = false)
-
-    private fun parseSearchManga(response: Response, query: String, hasChaptersOnly: Boolean): MangasPage {
-        val data = response.parseAs<MangaListDto>()
+        val data = client.get("$url${nsfwQueryParam()}").parseAs<MangaListDto>()
         val filtered = if (hasChaptersOnly) data.mangas.filter { it.chapters > 0 } else data.mangas
         val mangas = filtered.map { it.toSManga() }
         val q = query.trim().lowercase()
@@ -132,58 +106,50 @@ abstract class ScansFR :
         return MangasPage(sorted, data.page < data.totalPages)
     }
 
-    // ============================== Details ===============================
-
-    override fun getMangaUrl(manga: SManga): String = "$baseUrl${manga.url}"
-
-    override fun mangaDetailsRequest(manga: SManga): Request {
-        val slug = manga.url.removePrefix("/manga/")
-        return GET("$apiUrl/api/v1/mangas/$slug", headers)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.pathSegments.size != 2 || url.pathSegments[0] != "manga") return null
+        return getMangaDetail(url.pathSegments[1]).toSManga()
     }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val dto = response.parseAs<MangaDetailDto>()
-        return SManga.create().apply {
-            url = "/manga/${dto.slug}"
-            title = dto.title
-            thumbnail_url = "$apiUrl${dto.cover}"
-            description = dto.description.takeIf { it.isNotBlank() }
-            author = dto.author
-            artist = dto.artist.takeIf { it != dto.author }
-            genre = dto.tags.joinToString()
-            status = dto.status.toSMangaStatus()
-        }
-    }
+    // ========================= Details & Chapters =========================
 
-    // ============================== Chapters ==============================
-
-    override fun getChapterUrl(chapter: SChapter): String = "$baseUrl${chapter.url}"
-
-    override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
-
-    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> {
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
         val slug = manga.url.removePrefix("/manga/")
-        return client.newCall(GET("$apiUrl/api/v1/mangas/$slug", headers))
-            .asObservableSuccess()
-            .map { response ->
-                response.parseAs<MangaDetailDto>().chaptersList
-                    .sortedByDescending { it.number }
-                    .map { chapter ->
-                        SChapter.create().apply {
-                            url = "/$slug/${chapter.number}"
-                            name = chapter.title
-                            date_upload = chapter.date.parseDate()
-                            chapter_number = chapter.number.toFloat()
-                        }
-                    }
+        val dto = getMangaDetail(slug)
+        val chapterList = dto.chaptersList
+            .sortedByDescending { it.number }
+            .map { chapter ->
+                SChapter.create().apply {
+                    url = "/$slug/${chapter.number}"
+                    name = chapter.title
+                    date_upload = Instant.tryParse(chapter.date)
+                    chapter_number = chapter.number.toFloat()
+                }
             }
+        return SMangaUpdate(dto.toSManga(), chapterList)
     }
 
-    override fun chapterListParse(response: Response): List<SChapter> = throw UnsupportedOperationException()
+    private suspend fun getMangaDetail(slug: String) = client.get("$apiUrl/api/v1/mangas/$slug").parseAs<MangaDetailDto>()
+
+    private fun MangaDetailDto.toSManga() = SManga.create().apply {
+        url = "/manga/$slug"
+        title = this@toSManga.title
+        thumbnail_url = "$apiUrl$cover"
+        description = this@toSManga.description.takeIf { it.isNotBlank() }
+        author = this@toSManga.author
+        artist = this@toSManga.artist.takeIf { it != this@toSManga.author }
+        genre = tags.joinToString()
+        status = this@toSManga.status.toSMangaStatus()
+    }
 
     // =============================== Pages ================================
 
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val parts = chapter.url.trim('/').split("/")
         val mangaSlug = parts[0]
         val chapterNumber = parts[1]
@@ -194,28 +160,23 @@ abstract class ScansFR :
             .add("X-Session-ID", sessionId)
             .build()
 
-        return client.newCall(POST("$apiUrl/api/v1/chapters/$chapterId/token", tokenHeaders, body))
-            .asObservableSuccess()
-            .map { response ->
-                val dto = response.parseAs<ChapterTokenDto>()
-                (1..dto.pageCount).map { pageNumber ->
-                    val imageUrl = "$apiUrl/api/v1/images/${dto.chapterId}/$pageNumber?sig=${dto.sig}&exp=${dto.exp}&s=${dto.sessionHash}"
-                    Page(pageNumber - 1, imageUrl = imageUrl)
-                }
-            }
+        val dto = client.post("$apiUrl/api/v1/chapters/$chapterId/token", tokenHeaders, body)
+            .parseAs<ChapterTokenDto>()
+        return (1..dto.pageCount).map { pageNumber ->
+            val imageUrl = "$apiUrl/api/v1/images/${dto.chapterId}/$pageNumber?sig=${dto.sig}&exp=${dto.exp}&s=${dto.sessionHash}"
+            Page(pageNumber - 1, imageUrl = imageUrl)
+        }
     }
-
-    override fun pageListParse(response: Response): List<Page> = throw UnsupportedOperationException()
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
     override fun imageRequest(page: Page): Request = GET(page.imageUrl!!, imageHeaders)
 
     // ============================= Filters ================================
 
-    override fun getFilterList() = getFilters()
+    override fun getFilterList(data: JsonElement?) = getFilters()
 
     // ============================= Utilities ==============================
+
+    private fun MangaListDto.toMangasPage() = MangasPage(mangas.map { it.toSManga() }, page < totalPages)
 
     private fun String.toSMangaStatus() = when (this) {
         "ongoing", "En cours" -> SManga.ONGOING
@@ -225,15 +186,9 @@ abstract class ScansFR :
         else -> SManga.UNKNOWN
     }
 
-    private fun String?.parseDate(): Long = DATE_FORMATTER.tryParse(this)
-
     companion object {
         private const val PREF_SHOW_NSFW = "pref_show_nsfw"
 
         private val JSON_MEDIA_TYPE = "application/json".toMediaType()
-
-        private val DATE_FORMATTER = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT).apply {
-            timeZone = TimeZone.getTimeZone("UTC")
-        }
     }
 }
