@@ -1,56 +1,52 @@
 package eu.kanade.tachiyomi.extension.es.plottwistnofansub
 
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.network.post
 import keiyoushi.network.rateLimit
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
+import kotlinx.serialization.SerializationException
 import okhttp3.FormBody
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.time.Duration.Companion.seconds
 
 @Source
-abstract class PlotTwistNoFansub : HttpSource() {
+abstract class PlotTwistNoFansub : KeiSource() {
 
-    override val supportsLatest = true
-
-    override val client: OkHttpClient = network.client.newBuilder()
-        .rateLimit(2, 1.seconds)
-        .build()
-
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
+    override fun OkHttpClient.Builder.configureClient() = rateLimit(2, 1.seconds)
 
     // ============================== Popular ===============================
-    override fun popularMangaRequest(page: Int): Request {
+    override suspend fun getPopularManga(page: Int): MangasPage = getLibrary(page, "trending")
+
+    private suspend fun getLibrary(page: Int, orderBy: String): MangasPage {
         val url = baseUrl.toHttpUrl().newBuilder().apply {
             addPathSegment("biblioteca3")
             if (page > 1) {
                 addPathSegment("page")
                 addPathSegment(page.toString())
             }
-            addQueryParameter("m_orderby", "trending")
+            addQueryParameter("m_orderby", orderBy)
         }.build()
-        return GET(url, headers)
+        return parseMangaList(client.get(url).asJsoup())
     }
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
-
+    private fun parseMangaList(document: Document): MangasPage {
         val mangas = document.select("div.manga-grid-v2 figure").map { element ->
             SManga.create().apply {
                 val a = element.selectFirst("a[href]")!!
@@ -67,87 +63,78 @@ abstract class PlotTwistNoFansub : HttpSource() {
     }
 
     // =============================== Latest ===============================
-    override fun latestUpdatesRequest(page: Int): Request {
+    override suspend fun getLatestUpdates(page: Int): MangasPage = getLibrary(page, "latest3")
+
+    // =============================== Search ===============================
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        if (query.isEmpty()) return getLibrary(page, "views3")
+
         val url = baseUrl.toHttpUrl().newBuilder().apply {
-            addPathSegment("biblioteca3")
             if (page > 1) {
                 addPathSegment("page")
                 addPathSegment(page.toString())
             }
-            addQueryParameter("m_orderby", "latest3")
+            addQueryParameter("s", query)
+            addQueryParameter("post_type", "wp-manga")
         }.build()
-        return GET(url, headers)
+        return parseMangaList(client.get(url).asJsoup())
     }
 
-    override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
-
-    // =============================== Search ===============================
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = baseUrl.toHttpUrl().newBuilder()
-
-        if (query.isNotEmpty()) {
-            if (page > 1) {
-                url.addPathSegment("page")
-                url.addPathSegment(page.toString())
-            }
-            url.addQueryParameter("s", query)
-            url.addQueryParameter("post_type", "wp-manga")
-        } else {
-            url.addPathSegment("biblioteca3")
-            if (page > 1) {
-                url.addPathSegment("page")
-                url.addPathSegment(page.toString())
-            }
-            url.addQueryParameter("m_orderby", "views3")
-        }
-
-        return GET(url.build(), headers)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host || url.pathSegments.firstOrNull() != "manga") return null
+        val slug = url.pathSegments.getOrNull(1)?.takeIf { it.isNotEmpty() } ?: return null
+        val manga = SManga.create().apply { this.url = "/manga/$slug/" }
+        return parseDetails(client.get(getMangaUrl(manga)).asJsoup(), manga)
     }
-
-    override fun searchMangaParse(response: Response): MangasPage = popularMangaParse(response)
-
-    override fun getFilterList(): FilterList = FilterList()
 
     // =========================== Manga Details ============================
-    override fun getMangaUrl(manga: SManga) = baseUrl + manga.url
+    // Details and the first batch of chapters come from the same page.
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get(getMangaUrl(manga)).asJsoup()
+        return SMangaUpdate(
+            parseDetails(document, manga),
+            if (fetchChapters) getChapters(document) else chapters,
+        )
+    }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
-        return SManga.create().apply {
-            title = document.selectFirst("h1.mn-detail-title")?.text()
-                ?: document.selectFirst(".post-title h1")?.text()
-                ?: throw Exception("Manga title not found")
+    private fun parseDetails(document: Document, manga: SManga): SManga = SManga.create().apply {
+        url = manga.url
+        title = document.selectFirst("h1.mn-detail-title")?.text()
+            ?: document.selectFirst(".post-title h1")?.text()
+            ?: throw Exception("Manga title not found")
 
-            thumbnail_url = document.selectFirst(".mn-detail-cover-frame img")?.imgAttr()
-                ?: document.selectFirst(".summary_image img")?.imgAttr()
+        thumbnail_url = document.selectFirst(".mn-detail-cover-frame img")?.imgAttr()
+            ?: document.selectFirst(".summary_image img")?.imgAttr()
 
-            description = document.selectFirst(".mn-detail-synopsis")?.text()
-                ?: document.selectFirst(".summary__content")?.text()
+        description = document.selectFirst(".mn-detail-synopsis")?.text()
+            ?: document.selectFirst(".summary__content")?.text()
 
-            genre = document.select(".mn-detail-genres-desktop a").joinToString { it.text() }
-                .ifEmpty { document.select(".genres-content a").joinToString { it.text() } }
+        genre = document.select(".mn-detail-genres-desktop a").joinToString { it.text() }
+            .ifEmpty { document.select(".genres-content a").joinToString { it.text() } }
 
-            author = document.selectFirst(".mn-detail-pill-label:contains(Autor) + .mn-detail-pill-value")?.text()
-                ?: document.selectFirst(".author-content a")?.text()
+        author = document.selectFirst(".mn-detail-pill-label:contains(Autor) + .mn-detail-pill-value")?.text()
+            ?: document.selectFirst(".author-content a")?.text()
 
-            val statusPill = document.selectFirst(".mn-detail-pill-value")?.text() ?: ""
-            val statusClass = document.selectFirst(".mn-detail-pill-value")?.classNames()
-                ?.firstOrNull { it.startsWith("mn-st-") } ?: ""
+        val statusPill = document.selectFirst(".mn-detail-pill-value")?.text() ?: ""
+        val statusClass = document.selectFirst(".mn-detail-pill-value")?.classNames()
+            ?.firstOrNull { it.startsWith("mn-st-") } ?: ""
 
-            status = when {
-                statusClass == "mn-st-emit" || statusPill.contains("en emisión", true) || statusPill.contains("en curso", true) -> SManga.ONGOING
-                statusClass == "mn-st-comp" || statusPill.contains("finalizado", true) || statusPill.contains("completado", true) -> SManga.COMPLETED
-                statusClass == "mn-st-cancel" || statusPill.contains("cancelado", true) -> SManga.CANCELLED
-                statusClass == "mn-st-pause" || statusPill.contains("en espera", true) -> SManga.ON_HIATUS
-                else -> SManga.UNKNOWN
-            }
+        status = when {
+            statusClass == "mn-st-emit" || statusPill.contains("en emisión", true) || statusPill.contains("en curso", true) -> SManga.ONGOING
+            statusClass == "mn-st-comp" || statusPill.contains("finalizado", true) || statusPill.contains("completado", true) -> SManga.COMPLETED
+            statusClass == "mn-st-cancel" || statusPill.contains("cancelado", true) -> SManga.CANCELLED
+            statusClass == "mn-st-pause" || statusPill.contains("en espera", true) -> SManga.ON_HIATUS
+            else -> SManga.UNKNOWN
         }
     }
 
     // ============================== Chapters ==============================
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
-
+    private suspend fun getChapters(document: Document): List<SChapter> {
         val mangaId = document.selectFirst("#mn-detail-load-more")?.attr("data-manga")
             ?: document.selectFirst("script:containsData(mnWpMangaId)")
                 ?.data()
@@ -197,13 +184,10 @@ abstract class PlotTwistNoFansub : HttpSource() {
                 .add("page", page.toString())
                 .build()
 
-            val rawJson = client.newCall(
-                POST("$baseUrl/wp-admin/admin-ajax.php", headers, form),
-            ).execute().use { it.body.string() }
-
             val apiData = try {
-                rawJson.parseAs<ChapterAjaxResponse>()
-            } catch (e: Exception) {
+                client.post("$baseUrl/wp-admin/admin-ajax.php", form, ensureSuccess = false)
+                    .parseAs<ChapterAjaxResponse>()
+            } catch (e: SerializationException) {
                 break
             }
 
@@ -212,7 +196,7 @@ abstract class PlotTwistNoFansub : HttpSource() {
                 break
             }
 
-            val fragment = org.jsoup.Jsoup.parseBodyFragment(apiData.data.html, baseUrl)
+            val fragment = Jsoup.parseBodyFragment(apiData.data.html, baseUrl)
             val newChapters = fragment.body().select("a.mn-detail-chapter-item")
 
             if (newChapters.isEmpty()) {
@@ -233,8 +217,8 @@ abstract class PlotTwistNoFansub : HttpSource() {
     }
 
     // =============================== Pages ================================
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val document = client.get(getChapterUrl(chapter)).asJsoup()
         return (
             document.select("div.reading-content img").ifEmpty {
                 document.select("img.wp-manga-chapter-img")
@@ -249,8 +233,6 @@ abstract class PlotTwistNoFansub : HttpSource() {
             Page(i, imageUrl = img.imgAttr())
         }
     }
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
 
     // ============================= Utilities ==============================
     private fun Element.imgAttr(): String {
