@@ -5,9 +5,7 @@ import eu.kanade.tachiyomi.source.model.SManga
 import keiyoushi.utils.tryParse
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.TimeZone
+import kotlin.time.Instant
 
 @Serializable
 class PageDto(
@@ -41,13 +39,13 @@ class DetailsDto(
     private val lenguaje: String? = null,
 ) {
     fun toSManga() = SManga.create().apply {
+        url = id
         title = nombre
         thumbnail_url = imagen
         author = autores.joinToString(", ")
         artist = author
         genre = tags.joinToString(", ")
         status = SManga.COMPLETED
-        initialized = true
         description = buildString {
             tipo?.let { append("Tipo: ", it.replaceFirstChar { char -> char.uppercase() }, "\n") }
             lenguaje?.let {
@@ -61,13 +59,7 @@ class DetailsDto(
     fun toSChapter() = SChapter.create().apply {
         name = "Chapter"
         url = id
-        date_upload = dateFormat.tryParse(creacion)
-    }
-
-    companion object {
-        private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT).apply {
-            timeZone = TimeZone.getTimeZone("UTC")
-        }
+        date_upload = Instant.tryParse(creacion)
     }
 }
 
