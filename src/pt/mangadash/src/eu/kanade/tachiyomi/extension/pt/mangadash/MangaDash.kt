@@ -18,23 +18,28 @@ import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
+import kotlinx.serialization.json.JsonElement
 import okhttp3.FormBody
+import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
-import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.asResponseBody
 import okio.Buffer
+import org.jsoup.nodes.Document
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.io.File
@@ -46,10 +51,8 @@ import kotlin.time.Duration.Companion.minutes
 @Suppress("unused")
 @Source
 abstract class MangaDash :
-    HttpSource(),
+    KeiSource(),
     ConfigurableSource {
-
-    override val supportsLatest = true
 
     private val preferences by getPreferencesLazy()
 
@@ -143,14 +146,10 @@ abstract class MangaDash :
         chain.proceed(request)
     }
 
-    override val client: OkHttpClient = network.client.newBuilder()
-        .addInterceptor(loginInterceptor)
+    override fun OkHttpClient.Builder.configureClient() = addInterceptor(loginInterceptor)
         .addInterceptor(pdfInterceptor)
-        .build()
 
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Accept", "application/json, text/plain, */*")
-        .add("Referer", "$baseUrl/")
+    override fun Headers.Builder.configureHeaders() = add("Accept", "application/json, text/plain, */*")
 
     // ============================== Settings ==============================
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
@@ -212,20 +211,18 @@ abstract class MangaDash :
     }
 
     // ============================== Popular ==============================
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/api/mangas/list?page=$page&q=&sort=populares&categoria=&status=&ano=&plus18=", headers)
+    override suspend fun getPopularManga(page: Int): MangasPage = client.get("$baseUrl/api/mangas/list?page=$page&q=&sort=populares&categoria=&status=&ano=&plus18=").toMangasPage()
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val dto = response.parseAs<MangaListDto>()
+    private fun Response.toMangasPage(): MangasPage {
+        val dto = parseAs<MangaListDto>()
         return MangasPage(dto.mangas, dto.hasNext)
     }
 
     // ============================== Latest ===============================
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/api/mangas/list?page=$page&q=&sort=recentes&categoria=&status=&ano=&plus18=", headers)
-
-    override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
+    override suspend fun getLatestUpdates(page: Int): MangasPage = client.get("$baseUrl/api/mangas/list?page=$page&q=&sort=recentes&categoria=&status=&ano=&plus18=").toMangasPage()
 
     // ============================== Search ===============================
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val sort = filters.firstInstanceOrNull<SortFilter>()?.toUriPart() ?: "recentes"
         val category = filters.firstInstanceOrNull<CategoryFilter>()?.toUriPart() ?: ""
         val status = filters.firstInstanceOrNull<StatusFilter>()?.toUriPart() ?: ""
@@ -242,33 +239,44 @@ abstract class MangaDash :
             addQueryParameter("plus18", plus18)
         }.build()
 
-        return GET(url, headers)
+        return client.get(url).toMangasPage()
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = popularMangaParse(response)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.pathSegments.size != 2 || url.pathSegments[0] != "manga") return null
+        val manga = SManga.create().apply { this.url = url.encodedPath }
+        return fetchMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false).manga
+    }
 
     // ============================== Details ==============================
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
-        return SManga.create().apply {
-            title = document.selectFirst(".neon-title")?.text()!!
-            author = document.selectFirst(".tag-author")?.text()
-            genre = document.select(".manga-tags a.tag:not(.tag-author)").joinToString { it.text() }
-            description = document.selectFirst(".manga-description")?.text()
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get(getMangaUrl(manga)).asJsoup()
+        return SMangaUpdate(mangaDetailsParse(document, manga.url), chapterListParse(document))
+    }
 
-            val statsText = document.select(".stats-row .stat-item").text()
-            status = when {
-                statsText.contains("Lançamento", ignoreCase = true) -> SManga.ONGOING
-                statsText.contains("Concluído", ignoreCase = true) -> SManga.COMPLETED
-                statsText.contains("Hiato", ignoreCase = true) -> SManga.ON_HIATUS
-                else -> SManga.UNKNOWN
-            }
+    private fun mangaDetailsParse(document: Document, mangaUrl: String): SManga = SManga.create().apply {
+        url = mangaUrl
+        title = document.selectFirst(".neon-title")?.text()!!
+        author = document.selectFirst(".tag-author")?.text()
+        genre = document.select(".manga-tags a.tag:not(.tag-author)").joinToString { it.text() }
+        description = document.selectFirst(".manga-description")?.text()
+
+        val statsText = document.select(".stats-row .stat-item").text()
+        status = when {
+            statsText.contains("Lançamento", ignoreCase = true) -> SManga.ONGOING
+            statsText.contains("Concluído", ignoreCase = true) -> SManga.COMPLETED
+            statsText.contains("Hiato", ignoreCase = true) -> SManga.ON_HIATUS
+            else -> SManga.UNKNOWN
         }
     }
 
     // ============================= Chapters ==============================
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
+    private fun chapterListParse(document: Document): List<SChapter> {
         val chapters = document.select(".chapters-scroll-container .chapter-row").map { element ->
             SChapter.create().apply {
                 url = element.attr("href")
@@ -288,8 +296,8 @@ abstract class MangaDash :
     }
 
     // =============================== Pages ===============================
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val document = client.get(getChapterUrl(chapter)).asJsoup()
         val dataElement = document.selectFirst("script#chapterViewerData")
             ?: throw Exception("Dados do capítulo não encontrados")
 
@@ -313,14 +321,8 @@ abstract class MangaDash :
                 .connectTimeout(1.minutes)
                 .build()
 
-            val pdfHeaders = headersBuilder()
-                .add("Origin", baseUrl)
-                .build()
-
-            val pdfRequest = GET(pdfUrl, pdfHeaders)
-
             // Using use { ... } around manual network calls block for reliable memory release
-            pdfClient.newCall(pdfRequest).execute().use { pdfResponse ->
+            pdfClient.get(pdfUrl, ensureSuccess = false).use { pdfResponse ->
                 if (!pdfResponse.isSuccessful) {
                     throw Exception("HTTP error ${pdfResponse.code} ao baixar o arquivo PDF do capítulo")
                 }
@@ -356,10 +358,8 @@ abstract class MangaDash :
         throw Exception("Nenhuma imagem encontrada para este capítulo.")
     }
 
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException("Not used.")
-
     // ============================== Filters ==============================
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?) = FilterList(
         SortFilter(),
         CategoryFilter(),
         StatusFilter(),
