@@ -1,42 +1,37 @@
 package eu.kanade.tachiyomi.extension.en.greedscans
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
+import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
 import java.text.SimpleDateFormat
 import java.util.Locale
 
 @Source
-abstract class GreedScans : HttpSource() {
+abstract class GreedScans : KeiSource() {
 
     private val apiUrl = "https://api.gojoscans.com/api"
-    override val supportsLatest = true
 
     // ==================== POPULAR ====================
 
-    override fun popularMangaRequest(page: Int) = searchMangaRequest(page, "", SortFilter.popular)
-
-    override fun popularMangaParse(response: Response) = searchMangaParse(response)
+    override suspend fun getPopularManga(page: Int) = getSearchMangaList(page, "", SortFilter.popular)
 
     // ==================== LATEST ====================
 
-    override fun latestUpdatesRequest(page: Int) = searchMangaRequest(page, "", SortFilter.latest)
-
-    override fun latestUpdatesParse(response: Response) = searchMangaParse(response)
+    override suspend fun getLatestUpdates(page: Int) = getSearchMangaList(page, "", SortFilter.latest)
 
     // ==================== SEARCH ====================
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val url = "$apiUrl/series".toHttpUrl().newBuilder().apply {
             addQueryParameter("page", page.toString())
             addQueryParameter("per_page", "24")
@@ -45,15 +40,11 @@ abstract class GreedScans : HttpSource() {
             filters.filterIsInstance<UrlFilter>().forEach { it.addToUrl(this) }
         }.build()
 
-        return GET(url, headers)
-    }
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        val data = response.parseAs<SeriesListResponse>().data
+        val data = client.get(url).parseAs<SeriesListResponse>().data
 
         val mangas = data.data.map { series ->
             SManga.create().apply {
-                url = "/series/${series.slug}"
+                this.url = "/series/${series.slug}"
                 title = series.title
                 thumbnail_url = series.coverImage
                 status = series.status.toStatus()
@@ -63,7 +54,7 @@ abstract class GreedScans : HttpSource() {
         return MangasPage(mangas, data.hasNextPage())
     }
 
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?) = FilterList(
         SortFilter(),
         StatusFilter(),
         TypeFilter(),
@@ -71,17 +62,18 @@ abstract class GreedScans : HttpSource() {
         GenreFilter(),
     )
 
-    // ==================== MANGA DETAILS ====================
+    // ==================== MANGA DETAILS & CHAPTER LIST ====================
 
-    override fun mangaDetailsRequest(manga: SManga): Request {
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
         val compatibleUrl = manga.url.replace("/manga/", "/series/")
-        return GET("$apiUrl$compatibleUrl", headers)
-    }
+        val data = client.get("$apiUrl$compatibleUrl").parseAs<SeriesDetailResponse>().data
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val data = response.parseAs<SeriesDetailResponse>().data
-
-        return SManga.create().apply {
+        manga.apply {
             url = "/series/${data.slug}"
             title = data.title
             author = data.author
@@ -97,16 +89,8 @@ abstract class GreedScans : HttpSource() {
                 }
             }
         }
-    }
 
-    // ==================== CHAPTER LIST ====================
-
-    override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val data = response.parseAs<SeriesDetailResponse>().data
-
-        return data.chapters.sortedByDescending { it.chapterNumber }.map { chapter ->
+        val chapterList = data.chapters.sortedByDescending { it.chapterNumber }.map { chapter ->
             SChapter.create().apply {
                 url = "/series/${data.slug}/chapters/${chapter.slug}"
                 name = chapter.title
@@ -115,6 +99,8 @@ abstract class GreedScans : HttpSource() {
                 } ?: 0L
             }
         }
+
+        return SMangaUpdate(manga, chapterList)
     }
 
     companion object {
@@ -123,15 +109,11 @@ abstract class GreedScans : HttpSource() {
 
     // ==================== PAGE LIST ====================
 
-    override fun pageListRequest(chapter: SChapter): Request = GET("$apiUrl${chapter.url}", headers)
-
-    override fun pageListParse(response: Response): List<Page> {
-        val images = response.parseAs<ChapterDetailResponse>().data.chapter.images
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val images = client.get("$apiUrl${chapter.url}").parseAs<ChapterDetailResponse>().data.chapter.images
 
         return images.mapIndexed { i, img -> Page(i, imageUrl = img.imageUrl) }
     }
-
-    override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException("Not used")
 
     // ==================== HELPERS ====================
 
