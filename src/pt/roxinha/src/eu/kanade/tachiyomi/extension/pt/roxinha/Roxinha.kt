@@ -3,7 +3,6 @@ package eu.kanade.tachiyomi.extension.pt.roxinha
 import android.text.InputType
 import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -11,61 +10,47 @@ import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonRequestBody
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import rx.Observable
 import java.io.IOException
 
 @Source
 abstract class Roxinha :
-    HttpSource(),
+    KeiSource(),
     ConfigurableSource {
 
-    override val supportsLatest = true
-
-    private val apiUrl = "$baseUrl/api"
+    private val apiUrl get() = "$baseUrl/api"
 
     private val preferences by getPreferencesLazy()
 
     private var token: String? = null
 
-    override val client by lazy {
-        network.client.newBuilder()
-            .addInterceptor(::authIntercept)
-            .build()
-    }
+    override fun OkHttpClient.Builder.configureClient() = addInterceptor(::authIntercept)
 
-    override fun headersBuilder() = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
-        .add("Origin", baseUrl)
-
-    override fun popularMangaRequest(page: Int): Request {
+    override suspend fun getPopularManga(page: Int): MangasPage {
         val offset = (page - 1) * 24
-        return GET("$apiUrl/manga/search/advanced?sort=views&order=DESC&limit=24&offset=$offset", headers)
+        return getMangasPage("$apiUrl/manga/search/advanced?sort=views&order=DESC&limit=24&offset=$offset".toHttpUrl())
     }
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val dto = response.parseAs<SearchResponseDto>()
-        val (mangas, hasMore) = dto.toMangasPage(baseUrl)
-        return MangasPage(mangas, hasMore)
-    }
-
-    override fun latestUpdatesRequest(page: Int): Request {
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
         val offset = (page - 1) * 24
-        return GET("$apiUrl/manga/search/advanced?sort=updatedAt&order=DESC&limit=24&offset=$offset", headers)
+        return getMangasPage("$apiUrl/manga/search/advanced?sort=updatedAt&order=DESC&limit=24&offset=$offset".toHttpUrl())
     }
 
-    override fun latestUpdatesParse(response: Response) = popularMangaParse(response)
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val offset = (page - 1) * 24
         val url = "$apiUrl/manga/search/advanced".toHttpUrl().newBuilder().apply {
             addQueryParameter("limit", "24")
@@ -100,33 +85,41 @@ abstract class Roxinha :
             }
         }.build()
 
-        return GET(url, headers)
+        return getMangasPage(url)
     }
 
-    override fun searchMangaParse(response: Response) = popularMangaParse(response)
+    private suspend fun getMangasPage(url: HttpUrl): MangasPage {
+        val dto = client.get(url).parseAs<SearchResponseDto>()
+        val (mangas, hasMore) = dto.toMangasPage(baseUrl)
+        return MangasPage(mangas, hasMore)
+    }
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val segments = url.pathSegments
+        if (url.host != baseUrl.toHttpUrl().host || segments.size != 2 || segments[0] != "manga") {
+            return null
+        }
+        return client.get("$apiUrl/manga/${segments[1]}").parseAs<MangaDto>().toSManga(baseUrl)
+    }
 
     override fun getMangaUrl(manga: SManga) = "$baseUrl/manga/${manga.url}"
 
-    override fun mangaDetailsRequest(manga: SManga): Request = GET("$apiUrl/manga/${manga.url}", headers)
-
-    override fun mangaDetailsParse(response: Response): SManga {
-        val dto = response.parseAs<MangaDto>()
-        return dto.toSManga(baseUrl)
-    }
-
-    override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val dto = response.parseAs<MangaDto>()
-        return dto.toSChapters()
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val dto = client.get("$apiUrl/manga/${manga.url}").parseAs<MangaDto>()
+        return SMangaUpdate(dto.toSManga(baseUrl), dto.toSChapters())
     }
 
     override fun getChapterUrl(chapter: SChapter) = "$baseUrl/manga/chapter/${chapter.url}"
 
-    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val chapterUrl = "$apiUrl/manga/chapter/${chapter.url}"
 
-        val accessRes = client.newCall(GET("$chapterUrl/access", headers)).execute()
+        val accessRes = client.get("$chapterUrl/access", ensureSuccess = false)
         if (!accessRes.isSuccessful) {
             val message = accessRes.errorMessage()
             throw Exception(if (accessRes.code == 401) "$message. $LOGIN_HINT" else message)
@@ -134,18 +127,11 @@ abstract class Roxinha :
         val accessDto = accessRes.parseAs<TicketDto>()
         val accessHeaders = headersBuilder().set("x-chapter-access", accessDto.ticket).build()
 
-        val chapterRes = client.newCall(GET(chapterUrl, accessHeaders)).execute()
-        val chapterDto = chapterRes.parseAs<ChapterDetailsDto>()
-        return Observable.just(chapterDto.toPages(baseUrl))
+        val chapterDto = client.get(chapterUrl, accessHeaders).parseAs<ChapterDetailsDto>()
+        return chapterDto.toPages(baseUrl)
     }
 
-    override fun pageListRequest(chapter: SChapter) = throw UnsupportedOperationException()
-
-    override fun pageListParse(response: Response) = throw UnsupportedOperationException()
-
-    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
-
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?) = FilterList(
         SortFilter(),
         StatusFilter(),
         TypeFilter(),
