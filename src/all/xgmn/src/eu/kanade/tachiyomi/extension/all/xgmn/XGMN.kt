@@ -1,39 +1,44 @@
 package eu.kanade.tachiyomi.extension.all.xgmn
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import eu.kanade.tachiyomi.source.model.UpdateStrategy
-import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.tryParse
+import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Request
-import okhttp3.Response
+import org.jsoup.nodes.Document
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
 
 @Source
-abstract class XGMN : HttpSource() {
+abstract class XGMN : KeiSource() {
 
-    override val supportsLatest = true
-
+    // baseUrl only redirects to the mirror currently serving the site
     private var redirectUrl: String? = null
 
     private val currentBaseUrl: String
         get() = redirectUrl ?: baseUrl
 
-    override fun popularMangaRequest(page: Int) = GET("$currentBaseUrl/top.html", headers)
-
-    override fun popularMangaParse(response: Response) = response.asJsoup().let { doc ->
+    private suspend fun getDocument(url: String): Document = client.get(url).asJsoup().also { doc ->
         redirectUrl = redirectUrl ?: doc.location().toHttpUrl().let { "${it.scheme}://${it.host}" }
+    }
+
+    override suspend fun getPopularManga(page: Int): MangasPage = parseMangaList(getDocument("$currentBaseUrl/top.html"))
+
+    override suspend fun getLatestUpdates(page: Int): MangasPage = parseMangaList(getDocument("$currentBaseUrl/new.html"))
+
+    private fun parseMangaList(doc: Document): MangasPage {
         val cur = doc.selectFirst(".current")?.text()?.toInt()
-        MangasPage(
+        return MangasPage(
             doc.select(".related_box").map {
                 SManga.create().apply {
                     thumbnail_url = it.selectFirst("img")?.absUrl("src")
@@ -47,28 +52,20 @@ abstract class XGMN : HttpSource() {
         )
     }
 
-    override fun latestUpdatesRequest(page: Int) = GET("$currentBaseUrl/new.html", headers)
-
-    override fun latestUpdatesParse(response: Response) = popularMangaParse(response)
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url = currentBaseUrl.toHttpUrl().newBuilder()
-        if (query.isNotBlank()) {
-            url.addPathSegments("plus/search/index.asp")
-                .addQueryParameter("keyword", query)
-                .addQueryParameter("p", page.toString())
-        } else {
-            url.addPathSegments(filters.first().toString())
-            if (page > 1) url.addPathSegment("page_$page.html")
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val builder = currentBaseUrl.toHttpUrl().newBuilder()
+        if (query.isBlank()) {
+            builder.addPathSegments(filters.first().toString())
+            if (page > 1) builder.addPathSegment("page_$page.html")
+            return parseMangaList(getDocument(builder.toString()))
         }
-        return GET(url.build(), headers)
-    }
 
-    override fun searchMangaParse(response: Response) = if (response.request.url.pathSegments.contains("search")) {
-        val doc = response.asJsoup()
-        redirectUrl = redirectUrl ?: doc.location().toHttpUrl().let { "${it.scheme}://${it.host}" }
+        builder.addPathSegments("plus/search/index.asp")
+            .addQueryParameter("keyword", query)
+            .addQueryParameter("p", page.toString())
+        val doc = getDocument(builder.toString())
         val current = doc.selectFirst(".current")!!.text().toInt()
-        MangasPage(
+        return MangasPage(
             doc.select(".node > p > a").map {
                 SManga.create().apply {
                     title = it.text()
@@ -78,38 +75,39 @@ abstract class XGMN : HttpSource() {
             },
             current < doc.select(".list .pagination a").size,
         )
-    } else {
-        popularMangaParse(response)
     }
 
-    override fun mangaDetailsParse(response: Response) = response.asJsoup().let { doc ->
-        redirectUrl = redirectUrl ?: doc.location().toHttpUrl().let { "${it.scheme}://${it.host}" }
-        SManga.create().apply {
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val doc = getDocument(getMangaUrl(manga))
+        val details = SManga.create().apply {
+            url = manga.url
+            title = manga.title
             author = doc.selectFirst(".item-2")?.text()?.substringAfter("模特：")
             update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
             status = SManga.COMPLETED
         }
+        val chapter = SChapter.create().apply {
+            setUrlWithoutDomain(doc.selectFirst(".current")!!.absUrl("href"))
+            name = doc.selectFirst(".article-title")!!.text()
+            chapter_number = 1F
+            date_upload = DATE_FORMAT.tryParse(
+                doc.selectFirst(".item-1")?.text()?.substringAfter("更新："),
+            )
+        }
+        return SMangaUpdate(details, listOf(chapter))
     }
 
-    override fun chapterListParse(response: Response) = response.asJsoup().let { doc ->
-        redirectUrl = redirectUrl ?: doc.location().toHttpUrl().let { "${it.scheme}://${it.host}" }
-        listOf(
-            SChapter.create().apply {
-                setUrlWithoutDomain(doc.selectFirst(".current")!!.absUrl("href"))
-                name = doc.selectFirst(".article-title")!!.text()
-                chapter_number = 1F
-                date_upload = DATE_FORMAT.tryParse(
-                    doc.selectFirst(".item-1")?.text()?.substringAfter("更新："),
-                )
-            },
-        )
-    }
-
-    override fun pageListParse(response: Response) = response.asJsoup().let { doc ->
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val doc = client.get(getChapterUrl(chapter)).asJsoup()
         val prefix = doc.selectFirst(".current")!!.absUrl("href").substringBeforeLast(".html")
         val total = PAGE_SIZE_REGEX.find(doc.selectFirst(".article-title")!!.text())!!.value
         val size = doc.select(".article-content p > img").size
-        List(total.toInt()) {
+        return List(total.toInt()) {
             Page(
                 it,
                 prefix + (it / size).let { v -> if (v == 0) "" else "_$v" } + ".html#${it % size + 1}",
@@ -117,15 +115,15 @@ abstract class XGMN : HttpSource() {
         }
     }
 
-    override fun imageUrlParse(response: Response): String {
-        val seq = response.request.url.fragment!!
-        val url = response.asJsoup()
+    override suspend fun getImageUrl(page: Page): String {
+        val seq = page.url.substringAfterLast('#')
+        val url = client.get(page.url).asJsoup()
             .selectXpath("//*[contains(@class,'article-content')]/p[@*[contains(.,'center')]]/img[position()=$seq]")
             .first() ?: throw Exception("没找到图片")
         return "$currentBaseUrl/${getUrlWithoutDomain(url.absUrl("src"))}"
     }
 
-    override fun getFilterList() = buildFilterList()
+    override fun getFilterList(data: JsonElement?) = buildFilterList()
 
     private fun getUrlWithoutDomain(url: String): String {
         val prefix = listOf("http://", "https://").firstOrNull(url::startsWith)
