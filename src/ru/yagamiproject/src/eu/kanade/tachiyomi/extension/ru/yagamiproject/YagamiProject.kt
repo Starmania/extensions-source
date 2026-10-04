@@ -1,35 +1,30 @@
 package eu.kanade.tachiyomi.extension.ru.yagamiproject
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
+import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.tryParse
-import okhttp3.Headers
-import okhttp3.Request
-import okhttp3.Response
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
+import org.jsoup.nodes.Document
 import java.text.SimpleDateFormat
 import java.util.Locale
 
 @Source
-abstract class YagamiProject : HttpSource() {
-    override val supportsLatest = true
-
-    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
-        .add("Referer", baseUrl)
-
+abstract class YagamiProject : KeiSource() {
     // Popular
-    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/list-new/$page", headers)
+    override suspend fun getPopularManga(page: Int): MangasPage = mangasPageParse(client.get("$baseUrl/list-new/$page").asJsoup())
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val document = response.asJsoup()
+    private fun mangasPageParse(document: Document): MangasPage {
         val mangas = document.select(".list .group").map { element ->
             SManga.create().apply {
                 element.select(".title a").first()!!.let {
@@ -45,36 +40,53 @@ abstract class YagamiProject : HttpSource() {
     }
 
     // Latest
-    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/latest/$page", headers)
-
-    override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
+    override suspend fun getLatestUpdates(page: Int): MangasPage = mangasPageParse(client.get("$baseUrl/latest/$page").asJsoup())
 
     // Search
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = mangasPageParse(client.get(searchUrl(page, query, filters)).asJsoup())
+
+    private fun searchUrl(page: Int, query: String, filters: FilterList): String {
         if (query.isNotBlank()) {
-            return GET("$baseUrl/reader/search/?s=$query&p=$page", headers)
+            return "$baseUrl/reader/search/?s=$query&p=$page"
         }
         val activeFilters = if (filters.isEmpty()) getFilterList() else filters
         activeFilters.firstInstanceOrNull<CategoryList>()?.let { filter ->
             if (filter.state > 0) {
                 val catQ = getCategoryList()[filter.state].name
-                return GET("$baseUrl/tags/$catQ", headers)
+                return "$baseUrl/tags/$catQ"
             }
         }
         activeFilters.firstInstanceOrNull<FormatList>()?.let { filter ->
             if (filter.state > 0) {
                 val formN = getFormatList()[filter.state].query
-                return GET("$baseUrl/$formN", headers)
+                return "$baseUrl/$formN"
             }
         }
-        return popularMangaRequest(page)
+        return "$baseUrl/list-new/$page"
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = popularMangaParse(response)
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.pathSegments.firstOrNull() != "series") return null
+        return fetchMangaUpdate(
+            SManga.create().apply { setUrlWithoutDomain(url.toString()) },
+            emptyList(),
+            fetchDetails = true,
+            fetchChapters = false,
+        ).manga
+    }
 
-    // Details
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = response.asJsoup()
+    // Details and chapters share one page
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val document = client.get(getMangaUrl(manga)).asJsoup()
+        return SMangaUpdate(mangaDetailsParse(document).apply { url = manga.url }, chapterListParse(document))
+    }
+
+    private fun mangaDetailsParse(document: Document): SManga {
         val infoElement = document.select(".large.comic .info").first()!!
         return SManga.create().apply {
             val titlestr = document.select("title").text()
@@ -110,7 +122,7 @@ abstract class YagamiProject : HttpSource() {
     }
 
     // Chapters
-    override fun chapterListParse(response: Response): List<SChapter> = response.asJsoup().select(".list .element").map { element ->
+    private fun chapterListParse(document: Document): List<SChapter> = document.select(".list .element").map { element ->
         SChapter.create().apply {
             val chapter = element.select(".title a").first()!!
             val chapterScanDate = element.select(".meta_r")
@@ -133,8 +145,8 @@ abstract class YagamiProject : HttpSource() {
     }
 
     // Pages
-    override fun pageListParse(response: Response): List<Page> {
-        val document = response.asJsoup()
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val document = client.get(getChapterUrl(chapter)).asJsoup()
         val webtoonsel = document.select(".web_pictures img.web_img")
         return if (webtoonsel.isEmpty()) {
             document.select(".dropdown li a").map {
@@ -145,8 +157,8 @@ abstract class YagamiProject : HttpSource() {
         }
     }
 
-    override fun imageUrlParse(response: Response): String {
-        val document = response.asJsoup()
+    override suspend fun getImageUrl(page: Page): String {
+        val document = client.get(page.url).asJsoup()
         val defaultimg = document.select("#page img").attr("abs:src")
         return if (defaultimg.contains("string(1)")) {
             document.select("#get_download").first()!!.absUrl("href")
@@ -156,7 +168,7 @@ abstract class YagamiProject : HttpSource() {
     }
 
     // Filters
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?) = FilterList(
         Filter.Header("ПРИМЕЧАНИЕ: Фильтры исключают другдруга!"),
         CategoryList(getCategoryList().map { it.name }.toTypedArray()),
         FormatList(getFormatList().map { it.name }.toTypedArray()),
