@@ -42,7 +42,6 @@ import java.util.concurrent.TimeUnit
 abstract class Yidan : HttpSource() {
 
     override val supportsLatest get() = true
-    private val apiUrl = "https://yd-api.hangtech.cn"
 
     override val client: OkHttpClient = network.client.newBuilder().addInterceptor { chain ->
         val request = chain.request()
@@ -83,7 +82,7 @@ abstract class Yidan : HttpSource() {
     override fun latestUpdatesParse(response: Response) = popularMangaParse(response)
 
     private fun searchByKeyword(page: Int, query: String): Request = POST(
-        "$apiUrl/api/searchNovel",
+        "$baseUrl/api/searchNovel",
         headers,
         KeywordSearchRequest(query).toJsonRequestBody(),
     )
@@ -93,7 +92,7 @@ abstract class Yidan : HttpSource() {
             return searchByKeyword(page, query)
         }
         return POST(
-            "$apiUrl/api/getByComicCategoryId",
+            "$baseUrl/api/getByComicCategoryId",
             headers,
             FilterRequest(
                 page = page,
@@ -155,7 +154,7 @@ abstract class Yidan : HttpSource() {
 
     override fun chapterListRequest(manga: SManga) = withUserId { userId ->
         POST(
-            "$apiUrl/api/getComicInfo",
+            "$baseUrl/api/getComicInfo",
             headers,
             ComicDetailRequest(manga.url, userId).toJsonRequestBody(),
         )
@@ -176,7 +175,7 @@ abstract class Yidan : HttpSource() {
 
     override fun pageListRequest(chapter: SChapter): Request = withUserId { userId ->
         POST(
-            "$apiUrl/api/getComicChapter",
+            "$baseUrl/api/getComicChapter",
             headers,
             ChapterContentRequest(chapter.url, userId).toJsonRequestBody(),
         )

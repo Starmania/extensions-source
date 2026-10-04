@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Yidan Girl"
-    versionCode = 5
+    versionCode = 6
     contentWarning = ContentWarning.NSFW
     libVersion = "1.4"
 
@@ -14,7 +14,7 @@ keiyoushi {
         name = "一耽女孩"
         lang = "zh"
         baseUrl {
-            custom("https://yidan9.club")
+            custom("https://yidan12.club")
         }
     }
 }
