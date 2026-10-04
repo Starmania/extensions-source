@@ -23,7 +23,6 @@ import keiyoushi.utils.getPreferences
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.runWebView
 import keiyoushi.utils.tryParseDate
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -209,27 +208,26 @@ abstract class IkigaiMangas :
         return MangasPage(mangaList, hasNextPage)
     }
 
-    private var seriesCache: Deferred<List<QwikSeriesDto>>? = null
+    private val seriesMutex = Mutex()
+    private var seriesCache: List<QwikSeriesDto>? = null
 
-    private suspend fun getQuerySeriesList(): List<QwikSeriesDto> {
-        val deferred = seriesCache ?: coroutineScope {
-            async {
-                val qfunc = getQfuncFromWebView(baseUrl, headers)
-                val url = baseUrl.toHttpUrl().newBuilder()
-                    .addQueryParameter("qfunc", qfunc)
-                    .build()
-                val payload = """{"_entry":"1","_objs":["\u0002_#s_$qfunc",["0"]]}"""
-                val body = payload.toRequestBody()
-                val headers = headersBuilder()
-                    .set("X-QRL", qfunc)
-                    .set("Content-Type", "application/qwik-json")
-                    .build()
-                client.post(url, headers, body).use { response ->
-                    response.parseAs<QwikData>().parseAsList<QwikSeriesDto>()
-                }
+    // Cache the list itself, not a Deferred: a timed out or cancelled fetch must not be remembered.
+    private suspend fun getQuerySeriesList(): List<QwikSeriesDto> = seriesMutex.withLock {
+        seriesCache ?: run {
+            val qfunc = getQfuncFromWebView(baseUrl, headers)
+            val url = baseUrl.toHttpUrl().newBuilder()
+                .addQueryParameter("qfunc", qfunc)
+                .build()
+            val payload = """{"_entry":"1","_objs":["\u0002_#s_$qfunc",["0"]]}"""
+            val body = payload.toRequestBody()
+            val headers = headersBuilder()
+                .set("X-QRL", qfunc)
+                .set("Content-Type", "application/qwik-json")
+                .build()
+            client.post(url, headers, body).use { response ->
+                response.parseAs<QwikData>().parseAsList<QwikSeriesDto>()
             }.also { seriesCache = it }
         }
-        return deferred.await()
     }
 
     private fun qwikDataParse(query: String, seriesList: List<QwikSeriesDto>, page: Int): MangasPage {
