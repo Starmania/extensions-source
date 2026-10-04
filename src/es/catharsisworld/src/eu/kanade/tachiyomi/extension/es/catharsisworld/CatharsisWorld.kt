@@ -10,7 +10,6 @@ import keiyoushi.annotation.Source
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
-import keiyoushi.utils.firstInstance
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonElement
@@ -48,8 +47,8 @@ abstract class CatharsisWorld : KeiSource() {
         return searchMangas(
             page = page,
             query = query,
-            sort = filters.firstInstance<SortFilter>().value,
-            status = filters.firstInstance<StatusFilter>().value,
+            sort = (filters.firstInstanceOrNull<SortFilter>() ?: SortFilter()).value,
+            status = filters.firstInstanceOrNull<StatusFilter>()?.value,
             genres = genres,
         )
     }
