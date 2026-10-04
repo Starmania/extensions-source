@@ -1,27 +1,28 @@
 package eu.kanade.tachiyomi.extension.pt.saikaiscan
 
-import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.json.Json
-import okhttp3.Headers
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.parseAs
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import rx.Observable
-import uy.kohesive.injekt.injectLazy
 import kotlin.time.Duration.Companion.seconds
 
 @Source
-abstract class SaikaiScan : HttpSource() {
+abstract class SaikaiScan : KeiSource() {
     private val apiUrlHost by lazy { apiUrl.toHttpUrl().host }
     private val storageUrlHost by lazy { storageUrl.toHttpUrl().host }
 
@@ -29,24 +30,16 @@ abstract class SaikaiScan : HttpSource() {
 
     private val storageUrl = "https://s3-beta.${baseUrl.substringAfterLast("/")}"
 
-    override val supportsLatest = true
-
-    override val client: OkHttpClient = network.client.newBuilder()
-        .rateLimit(1, 2.seconds) { it.host == apiUrlHost }
-        .rateLimit(1, 1.seconds) { it.host == storageUrlHost }
-        .build()
-
-    private val json: Json by injectLazy()
-
-    override fun headersBuilder(): Headers.Builder = Headers.Builder()
-        .add("Origin", baseUrl)
-        .add("Referer", "$baseUrl/")
-
-    override fun popularMangaRequest(page: Int): Request {
-        val apiHeaders = headersBuilder()
+    private val apiHeaders by lazy {
+        headersBuilder()
             .add("Accept", ACCEPT_JSON)
             .build()
+    }
 
+    override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(1, 2.seconds) { it.host == apiUrlHost }
+        .rateLimit(1, 1.seconds) { it.host == storageUrlHost }
+
+    override suspend fun getPopularManga(page: Int): MangasPage {
         val apiEndpointUrl = "$apiUrl/api/stories".toHttpUrl().newBuilder()
             .addQueryParameter("format", COMIC_FORMAT_ID)
             .addQueryParameter("sortProperty", "pageviews")
@@ -56,22 +49,10 @@ abstract class SaikaiScan : HttpSource() {
             .addQueryParameter("relationships", "language,type,format")
             .build()
 
-        return GET(apiEndpointUrl, apiHeaders)
+        return client.get(apiEndpointUrl, apiHeaders).toMangasPage()
     }
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val result = response.parseAs<SaikaiScanPaginatedStoriesDto>()
-
-        val mangaList = result.data!!.map { it.toSManga(storageUrl) }
-
-        return MangasPage(mangaList, result.hasNextPage)
-    }
-
-    override fun latestUpdatesRequest(page: Int): Request {
-        val apiHeaders = headersBuilder()
-            .add("Accept", ACCEPT_JSON)
-            .build()
-
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
         val apiEndpointUrl = "$apiUrl/api/lancamentos".toHttpUrl().newBuilder()
             .addQueryParameter("format", COMIC_FORMAT_ID)
             .addQueryParameter("page", page.toString())
@@ -79,16 +60,10 @@ abstract class SaikaiScan : HttpSource() {
             .addQueryParameter("relationships", "language,type,format,latestReleases.separator")
             .build()
 
-        return GET(apiEndpointUrl, apiHeaders)
+        return client.get(apiEndpointUrl, apiHeaders).toMangasPage()
     }
 
-    override fun latestUpdatesParse(response: Response): MangasPage = popularMangaParse(response)
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val apiHeaders = headersBuilder()
-            .add("Accept", ACCEPT_JSON)
-            .build()
-
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val apiEndpointUrl = "$apiUrl/api/stories".toHttpUrl().newBuilder()
             .addQueryParameter("format", COMIC_FORMAT_ID)
             .addQueryParameter("q", query)
@@ -101,100 +76,88 @@ abstract class SaikaiScan : HttpSource() {
         filters.filterIsInstance<UrlQueryFilter>()
             .forEach { it.addQueryParameter(apiEndpointUrl) }
 
-        return GET(apiEndpointUrl.build(), apiHeaders)
+        return client.get(apiEndpointUrl.build(), apiHeaders).toMangasPage()
     }
 
-    override fun searchMangaParse(response: Response): MangasPage = popularMangaParse(response)
+    private fun Response.toMangasPage(): MangasPage {
+        val result = parseAs<SaikaiScanPaginatedStoriesDto>()
 
-    override fun getMangaUrl(manga: SManga): String = baseUrl + manga.url
+        val mangaList = result.data!!.map { it.toSManga(storageUrl) }
 
-    override fun mangaDetailsRequest(manga: SManga): Request {
+        return MangasPage(mangaList, result.hasNextPage)
+    }
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val segments = url.pathSegments
+        val index = segments.indexOf("comics")
+        val storySlug = segments.getOrNull(index + 1)?.takeIf { index != -1 && it.isNotEmpty() }
+            ?: return null
+
+        return fetchStory(storySlug, "language,type,format,artists,status").toSManga(storageUrl)
+    }
+
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate = coroutineScope {
         val storySlug = manga.url.substringAfterLast("/")
 
-        val apiHeaders = headersBuilder()
-            .add("Accept", ACCEPT_JSON)
-            .build()
+        val updatedManga = async {
+            if (fetchDetails) {
+                fetchStory(storySlug, "language,type,format,artists,status").toSManga(storageUrl)
+            } else {
+                manga
+            }
+        }
+        val updatedChapters = async {
+            if (fetchChapters) {
+                val story = fetchStory(storySlug, "releases")
 
+                story.releases
+                    .filter { it.isActive == 1 }
+                    .map { it.toSChapter(story.slug) }
+                    .sortedByDescending(SChapter::chapter_number)
+            } else {
+                chapters
+            }
+        }
+
+        SMangaUpdate(updatedManga.await(), updatedChapters.await())
+    }
+
+    private suspend fun fetchStory(storySlug: String, relationships: String): SaikaiScanStoryDto {
         val apiEndpointUrl = "$apiUrl/api/stories".toHttpUrl().newBuilder()
             .addQueryParameter("format", COMIC_FORMAT_ID)
             .addQueryParameter("slug", storySlug)
             .addQueryParameter("per_page", "1")
-            .addQueryParameter("relationships", "language,type,format,artists,status")
+            .addQueryParameter("relationships", relationships)
             .build()
 
-        return GET(apiEndpointUrl, apiHeaders)
+        return client.get(apiEndpointUrl, apiHeaders)
+            .parseAs<SaikaiScanPaginatedStoriesDto>().data!![0]
     }
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val result = response.parseAs<SaikaiScanPaginatedStoriesDto>()
-
-        return result.data!![0].toSManga(storageUrl)
-    }
-
-    override fun chapterListRequest(manga: SManga): Request {
-        val storySlug = manga.url.substringAfterLast("/")
-
-        val apiHeaders = headersBuilder()
-            .add("Accept", ACCEPT_JSON)
-            .build()
-
-        val apiEndpointUrl = "$apiUrl/api/stories".toHttpUrl().newBuilder()
-            .addQueryParameter("format", COMIC_FORMAT_ID)
-            .addQueryParameter("slug", storySlug)
-            .addQueryParameter("per_page", "1")
-            .addQueryParameter("relationships", "releases")
-            .build()
-
-        return GET(apiEndpointUrl, apiHeaders)
-    }
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val result = response.parseAs<SaikaiScanPaginatedStoriesDto>()
-        val story = result.data!![0]
-
-        return story.releases
-            .filter { it.isActive == 1 }
-            .map { it.toSChapter(story.slug) }
-            .sortedByDescending(SChapter::chapter_number)
-    }
-
-    override fun getChapterUrl(chapter: SChapter): String = baseUrl + chapter.url
-
-    override fun pageListRequest(chapter: SChapter): Request {
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
         val releaseId = chapter.url
             .substringBeforeLast("/")
             .substringAfterLast("/")
-
-        val apiHeaders = headersBuilder()
-            .add("Accept", ACCEPT_JSON)
-            .build()
 
         val apiEndpointUrl = "$apiUrl/api/releases/$releaseId".toHttpUrl().newBuilder()
             .addQueryParameter("relationships", "releaseImages")
             .build()
 
-        return GET(apiEndpointUrl, apiHeaders)
-    }
-
-    override fun pageListParse(response: Response): List<Page> {
-        val result = response.parseAs<SaikaiScanReleaseResultDto>()
+        val result = client.get(apiEndpointUrl, apiHeaders).parseAs<SaikaiScanReleaseResultDto>()
 
         return result.data?.releaseImages.orEmpty().mapIndexed { i, obj ->
-            Page(i, "", "$storageUrl/${obj.image}")
+            Page(i, imageUrl = "$storageUrl/${obj.image}")
         }
     }
 
-    override fun fetchImageUrl(page: Page): Observable<String> = Observable.just(page.imageUrl!!)
-
-    override fun imageUrlParse(response: Response): String = ""
-
-    override fun imageRequest(page: Page): Request {
-        val imageHeaders = headersBuilder()
-            .add("Accept", ACCEPT_IMAGE)
-            .build()
-
-        return GET(page.imageUrl!!, imageHeaders)
-    }
+    override fun imageRequest(page: Page): Request = super.imageRequest(page).newBuilder()
+        .header("Accept", ACCEPT_IMAGE)
+        .build()
 
     // fetch('https://api.saikai.com.br/api/genres')
     //     .then(res => res.json())
@@ -277,16 +240,12 @@ abstract class SaikaiScan : HttpSource() {
         SortProperty("Data de criação", "created_at"),
     )
 
-    override fun getFilterList(): FilterList = FilterList(
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
         CountryFilter(getCountryList()),
         StatusFilter(getStatusList()),
         SortByFilter(getSortProperties()),
         GenreFilter(getGenreList()),
     )
-
-    private inline fun <reified T> Response.parseAs(): T = use {
-        json.decodeFromString(it.body.string())
-    }
 
     companion object {
         private const val ACCEPT_IMAGE = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
