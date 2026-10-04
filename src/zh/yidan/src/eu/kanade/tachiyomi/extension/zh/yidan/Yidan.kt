@@ -1,49 +1,33 @@
 package eu.kanade.tachiyomi.extension.zh.yidan
 
-import android.annotation.SuppressLint
-import android.app.Application
-import android.os.Handler
-import android.os.Looper
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import androidx.annotation.MainThread
-import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.post
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.WebViewTimeoutException
 import keiyoushi.utils.firstInstance
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.tryParse
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
+import keiyoushi.utils.runWebView
+import keiyoushi.utils.toJsonRequestBody
+import keiyoushi.utils.tryParseDate
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody
-import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
 import okhttp3.ResponseBody.Companion.asResponseBody
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
-import uy.kohesive.injekt.injectLazy
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
+import java.time.format.DateTimeFormatter
+import kotlin.time.Duration.Companion.seconds
 
 @Source
-abstract class Yidan : HttpSource() {
+abstract class Yidan : KeiSource() {
 
-    override val supportsLatest get() = true
-
-    override val client: OkHttpClient = network.client.newBuilder().addInterceptor { chain ->
+    override fun OkHttpClient.Builder.configureClient() = addInterceptor { chain ->
         val request = chain.request()
         val response = chain.proceed(request)
         val requestUrl = request.url.toString()
@@ -57,43 +41,35 @@ abstract class Yidan : HttpSource() {
         } else {
             response
         }
-    }.build()
+    }
 
-    private val json: Json by injectLazy()
-    private val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.ROOT)
+    override suspend fun getPopularManga(page: Int) = getComicByRow("29", page)
 
-    override fun popularMangaRequest(page: Int) = POST(
-        "$baseUrl/api/getByComicByRow",
-        headers,
-        ComicFetchRequest("29", page, PAGE_SIZE).toJsonRequestBody(),
-    )
+    override suspend fun getLatestUpdates(page: Int) = getComicByRow("34", page)
 
-    override fun popularMangaParse(response: Response): MangasPage {
-        val records = response.parseAs<CommonResponse<RecordResult>>().result.records
+    private suspend fun getComicByRow(column: String, page: Int): MangasPage {
+        val records = client.post(
+            "$baseUrl/api/getByComicByRow",
+            ComicFetchRequest(column, page, PAGE_SIZE).toJsonRequestBody(),
+        ).parseAs<CommonResponse<RecordResult>>().result.records
         return createMangasPage(records)
     }
 
-    override fun latestUpdatesRequest(page: Int) = POST(
-        "$baseUrl/api/getByComicByRow",
-        headers,
-        ComicFetchRequest("34", page, PAGE_SIZE).toJsonRequestBody(),
-    )
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val id = url.queryParameter("id") ?: return null
+        return getComicInfo(id).comic.toSManga()
+    }
 
-    override fun latestUpdatesParse(response: Response) = popularMangaParse(response)
-
-    private fun searchByKeyword(page: Int, query: String): Request = POST(
-        "$baseUrl/api/searchNovel",
-        headers,
-        KeywordSearchRequest(query).toJsonRequestBody(),
-    )
-
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         if (query.isNotEmpty()) {
-            return searchByKeyword(page, query)
+            val records = client.post(
+                "$baseUrl/api/searchNovel",
+                KeywordSearchRequest(query).toJsonRequestBody(),
+            ).parseAs<CommonResponse<List<Record>>>().result
+            return createMangasPage(records, paginated = false)
         }
-        return POST(
+        val records = client.post(
             "$baseUrl/api/getByComicCategoryId",
-            headers,
             FilterRequest(
                 page = page,
                 limit = PAGE_SIZE,
@@ -101,16 +77,8 @@ abstract class Yidan : HttpSource() {
                 orderType = filters.firstInstance<SortFilter>().selected,
                 overType = filters.firstInstance<StatusFilter>().selected,
             ).toJsonRequestBody(),
-        )
-    }
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        val searchByKeyword = response.request.url.toString().contains("searchNovel")
-        val records = when {
-            searchByKeyword -> response.parseAs<CommonResponse<List<Record>>>().result
-            else -> response.parseAs<CommonResponse<FilterResult>>().result.list
-        }
-        return createMangasPage(records, paginated = !searchByKeyword)
+        ).parseAs<CommonResponse<FilterResult>>().result.list
+        return createMangasPage(records)
     }
 
     private fun createMangasPage(records: List<Record>, paginated: Boolean = true): MangasPage = MangasPage(
@@ -128,22 +96,41 @@ abstract class Yidan : HttpSource() {
         .addQueryParameter("id", manga.url)
         .toString()
 
-    override fun mangaDetailsRequest(manga: SManga) = chapterListRequest(manga)
-
-    override fun mangaDetailsParse(response: Response): SManga {
-        val comic = response.parseAs<CommonResponse<ComicInfoResult>>().result.comic
-        return SManga.create().apply {
-            url = "${comic.id}"
-            title = comic.novelTitle
-            thumbnail_url = comic.bigImgUrl
-            genre = comic.tags
-            author = comic.author
-            description = comic.introduction
-            status = when (comic.overType) {
-                1 -> SManga.ONGOING
-                2 -> SManga.COMPLETED
-                else -> SManga.UNKNOWN
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val result = getComicInfo(manga.url)
+        val chapterList = result.chapterList.mapIndexed { index, chapter ->
+            SChapter.create().apply {
+                url = "${chapter.id}"
+                name = chapter.chapterName
+                date_upload = DateTimeFormatter.ISO_LOCAL_DATE.tryParseDate(chapter.createTime)
+                // used to get the real chapter url
+                chapter_number = index.toFloat()
             }
+        }.reversed()
+        return SMangaUpdate(result.comic.toSManga(), chapterList)
+    }
+
+    private suspend fun getComicInfo(comicId: String) = client.post(
+        "$baseUrl/api/getComicInfo",
+        ComicDetailRequest(comicId, getUserId()).toJsonRequestBody(),
+    ).parseAs<CommonResponse<ComicInfoResult>>().result
+
+    private fun Comic.toSManga() = SManga.create().apply {
+        url = "$id"
+        title = novelTitle
+        thumbnail_url = bigImgUrl
+        genre = tags
+        author = this@toSManga.author
+        description = introduction
+        status = when (overType) {
+            1 -> SManga.ONGOING
+            2 -> SManga.COMPLETED
+            else -> SManga.UNKNOWN
         }
     }
 
@@ -152,133 +139,41 @@ abstract class Yidan : HttpSource() {
         .addQueryParameter("s", chapter.chapter_number.toInt().toString())
         .toString()
 
-    override fun chapterListRequest(manga: SManga) = withUserId { userId ->
-        POST(
-            "$baseUrl/api/getComicInfo",
-            headers,
-            ComicDetailRequest(manga.url, userId).toJsonRequestBody(),
-        )
-    }
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val chapterList = response.parseAs<CommonResponse<ComicInfoResult>>().result.chapterList
-        return chapterList.mapIndexed { index, chapter ->
-            SChapter.create().apply {
-                url = "${chapter.id}"
-                name = chapter.chapterName
-                date_upload = dateFormat.tryParse(chapter.createTime)
-                // used to get the real chapter url
-                chapter_number = index.toFloat()
-            }
-        }.reversed()
-    }
-
-    override fun pageListRequest(chapter: SChapter): Request = withUserId { userId ->
-        POST(
+    override suspend fun getPageList(chapter: SChapter): List<Page> {
+        val contentList = client.post(
             "$baseUrl/api/getComicChapter",
-            headers,
-            ChapterContentRequest(chapter.url, userId).toJsonRequestBody(),
-        )
-    }
-
-    override fun pageListParse(response: Response): List<Page> {
-        val contentList = response.parseAs<CommonResponse<ChapterContentResult>>().result.content
+            ChapterContentRequest(chapter.url, getUserId()).toJsonRequestBody(),
+        ).parseAs<CommonResponse<ChapterContentResult>>().result.content
         return contentList.mapIndexed { index, content ->
             Page(index, imageUrl = content.url)
         }
     }
 
-    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
-
-    override fun getFilterList() = FilterList(
+    override fun getFilterList(data: JsonElement?) = FilterList(
         SortFilter(),
         StatusFilter(),
         CategoryFilter(),
     )
 
-    //region utils functions
+    private var userId: String? = null
 
-    private lateinit var userId: String
-
-    @MainThread
-    private fun WebView.readUserId(block: (userId: String) -> Unit) {
-        val script = "javascript:localStorage['uc']"
-        evaluateJavascript(script) { uc ->
-            if (uc.isNotEmpty() && uc != "null" && uc != "undefined") {
-                block(uc.removeSurrounding("'").removeSurrounding("\""))
+    // The site registers an anonymous user on first load and keeps its id in localStorage
+    private suspend fun getUserId(): String {
+        userId?.let { return it }
+        return try {
+            runWebView<String>(timeout = 20.seconds) {
+                blockImages = true
+                poll {
+                    evaluateJs("localStorage.getItem('uc')") { value ->
+                        value.parseAs<String?>()?.takeIf { it.isNotEmpty() }?.let(::resolve)
+                    }
+                }
+                loadUrl(baseUrl)
             }
-        }
+        } catch (_: WebViewTimeoutException) {
+            throw Exception("无法自动获取UserId，请先尝试通过内置WebView进入网站")
+        }.also { userId = it }
     }
-
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun <T> withUserId(block: (userId: String) -> T): T {
-        return if (this::userId.isInitialized) {
-            block(userId)
-        } else {
-            val mainHandler = Handler(Looper.getMainLooper())
-            var latch = CountDownLatch(1)
-            var webView: WebView? = null
-            mainHandler.post {
-                webView = WebView(Injekt.get<Application>()).apply {
-                    with(settings) {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        databaseEnabled = true
-                        blockNetworkImage = true
-                    }
-                }
-                webView?.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        view?.readUserId {
-                            userId = it
-                            latch.countDown()
-                        }
-                    }
-
-                    override fun shouldInterceptRequest(
-                        view: WebView?,
-                        request: WebResourceRequest?,
-                    ): WebResourceResponse? {
-                        // wait the auto register request
-                        if (request?.url?.encodedPath?.contains("api/regUser") == true) {
-                            latch.countDown()
-                        }
-                        return super.shouldInterceptRequest(view, request)
-                    }
-                }
-                webView?.loadUrl(baseUrl)
-            }
-            latch.await(15, TimeUnit.SECONDS)
-            if (!this::userId.isInitialized) {
-                latch = CountDownLatch(1)
-                mainHandler.postDelayed(
-                    {
-                        webView?.readUserId {
-                            userId = it
-                            latch.countDown()
-                        }
-                    },
-                    500L,
-                )
-                latch.await(5, TimeUnit.SECONDS)
-            }
-            mainHandler.post {
-                webView?.apply {
-                    stopLoading()
-                    destroy()
-                }
-                webView = null
-            }
-            if (!this::userId.isInitialized) {
-                throw Exception("无法自动获取UserId，请先尝试通过内置WebView进入网站")
-            }
-            block(userId)
-        }
-    }
-
-    private inline fun <reified T : Any> T.toJsonRequestBody(): RequestBody = json.encodeToString(this)
-        .toRequestBody("application/json".toMediaType())
-    //endregion
 
     companion object {
         private const val PAGE_SIZE = 16
