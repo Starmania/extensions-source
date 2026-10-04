@@ -265,6 +265,10 @@ abstract class Pawchive :
                 offset += PAGE_POST_LIMIT
                 hasNextPage = page.size == PAGE_POST_LIMIT
             }
+            // Posts have no chapter numbers, and a shared one makes the app's "skip duplicate
+            // chapters" collapse them all. Counting from the oldest keeps them unique and
+            // stops the app from guessing a number out of the post title.
+            result.forEachIndexed { i, chapter -> chapter.chapter_number = (result.size - i).toFloat() }
             result
         } else {
             chapters
