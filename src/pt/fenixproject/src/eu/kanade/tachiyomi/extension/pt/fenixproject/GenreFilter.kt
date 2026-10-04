@@ -1,0 +1,65 @@
+package eu.kanade.tachiyomi.extension.pt.fenixproject
+
+import eu.kanade.tachiyomi.source.model.Filter
+
+class GenreFilter :
+    Filter.Select<String>(
+        "Gênero (ignorado na busca por texto)",
+        genres.map { it.first }.toTypedArray(),
+    ) {
+    val selected get() = genres[state].second
+}
+
+private val genres = listOf(
+    "Todos" to null,
+    "Adaptação" to "12",
+    "Adulto" to "13",
+    "Amigos de Infância" to "14",
+    "Angústia" to "15",
+    "Animais" to "51",
+    "Aventura" to "2",
+    "Ação" to "1",
+    "BDSM" to "16",
+    "Casamento Arranjado" to "17",
+    "Comédia" to "3",
+    "Conto" to "18",
+    "Dark Romance" to "9",
+    "Demônios" to "50",
+    "Drama" to "4",
+    "Escolar" to "19",
+    "Escritório" to "20",
+    "Esporte" to "21",
+    "Familia" to "48",
+    "Fantasia" to "5",
+    "Fetiche" to "23",
+    "Ficção Científica" to "49",
+    "Harém Reverso" to "24",
+    "Histórico" to "11",
+    "Josei" to "25",
+    "Magia" to "26",
+    "Mindbreak" to "27",
+    "Mistério" to "6",
+    "Moderno" to "10",
+    "Médico" to "38",
+    "Omegaverse" to "28",
+    "Oneshot" to "29",
+    "Redenção" to "30",
+    "Reencarnação" to "31",
+    "Romance" to "7",
+    "Sem Censura" to "32",
+    "Shoujo" to "33",
+    "Shounen" to "34",
+    "Slice of Life" to "35",
+    "Sobrenatural" to "36",
+    "Stalker" to "37",
+    "Terror" to "8",
+    "Tragédia" to "39",
+    "Traição" to "40",
+    "Transmigração" to "41",
+    "Troca de Corpos" to "42",
+    "Vampiro" to "43",
+    "Viagem no Tempo" to "44",
+    "Vingança" to "47",
+    "Yaoi" to "45",
+    "Yuri" to "46",
+)
