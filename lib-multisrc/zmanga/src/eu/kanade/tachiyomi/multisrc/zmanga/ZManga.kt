@@ -89,6 +89,10 @@ abstract class ZManga : KeiSource() {
         } else {
             val url = "$baseUrl/$searchPath/${pagePathSegment(page)}".toHttpUrl().newBuilder()
             url.addQueryParameter("title", query)
+            // The site returns nothing without "order", and global search passes no filters.
+            if (filters.none { it is OrderByFilter }) {
+                url.addQueryParameter("order", "")
+            }
             filters.forEach { filter ->
                 when (filter) {
                     is AuthorFilter -> {
