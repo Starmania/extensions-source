@@ -62,7 +62,7 @@ internal suspend fun OkHttpClient.fetchReaderModule(baseUrl: String, headers: He
         .filter { it.endsWith(".js") && it != entry }
         .distinct()
         .toList()
-        .firstNotNullOfOrNull { name -> asset(name).takeIf { "freeBuffer:\"" in it } }
+        .firstNotNullOfOrNull { name -> asset(name).takeIf(EXPORT_MAP_REGEX::containsMatchIn) }
         ?: throw IOException("Reader signer bindings not found")
     val semantic = EXPORT_MAP_REGEX.find(shared)?.value
         ?.let { map -> PAIR_REGEX.findAll(map).associate { it.groupValues[1] to it.groupValues[2] } }
@@ -131,8 +131,12 @@ private val READER_CHUNK_REGEX = Regex(
     """"\./pages/(?:[\w-]+/)*serie-chapter-reader\.tsx":\(\)=>[\w$]+\(\(\)=>import\("\./([^"]+\.js)"\)(?:\.then\([^)]*\))?(?:,__vite__mapDeps\(\[([\d,]*)\]\))?""",
 )
 private val IMPORT_REGEX = Regex("""from"\./([^"]+\.js)"""")
-private val EXPORT_MAP_REGEX = Regex("""\{freeBuffer:"[^}]+\}""")
-private val PAIR_REGEX = Regex("""([\w$]+):"(_[\w$]+)"""")
+
+// The reader-side names and their glue exports, as `[["freeBuffer","_x"],...]` pairs in any order.
+private val EXPORT_MAP_REGEX = Regex(
+    """\[(?:\["[\w$]+","_[\w$]+"\],)*\["freeBuffer","_[\w$]+"\](?:,\["[\w$]+","_[\w$]+"\])*\]""",
+)
+private val PAIR_REGEX = Regex("""\["([\w$]+)","(_[\w$]+)"\]""")
 private val MAP_DEPS_REGEX = Regex("""m\.f=\[([^\]]+)\]""")
 private val DEP_REGEX = Regex(""""assets/([^"]+)"""")
 private val GLUE_EXPORT_REGEX = Regex("""[\w$]+\.(_[\w$]+)=[\w$]+\.([\w$]+)""")
