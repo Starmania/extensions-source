@@ -166,6 +166,7 @@ class Page(
     val isPermanentlyLocked: Boolean = false,
     val isLockedByCoins: Boolean = false,
     val isShortLinkLocked: Boolean = false,
+    val isAccessible: Boolean = false,
 )
 
 @Serializable

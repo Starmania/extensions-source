@@ -339,16 +339,20 @@ abstract class Iken :
 
         val data = response.parseAs<PageResponse>().chapter
 
-        if (data.isShortLinkLocked) {
-            throw Exception("Chapter locked (short link)")
-        }
+        // The lock flags are static per chapter; they stay set after a purchase,
+        // so only isAccessible says whether this account can actually read it.
+        if (!data.isAccessible) {
+            if (data.isShortLinkLocked) {
+                throw Exception("Chapter locked (short link)")
+            }
 
-        if (data.isLockedByCoins) {
-            throw Exception("Chapter locked (coins required)")
-        }
+            if (data.isLockedByCoins) {
+                throw Exception("Chapter locked (coins required)")
+            }
 
-        if (data.isPermanentlyLocked) {
-            throw Exception("Chapter permanently locked")
+            if (data.isPermanentlyLocked) {
+                throw Exception("Chapter permanently locked")
+            }
         }
 
         updateViews(null, id)
