@@ -482,8 +482,8 @@ abstract class InitManga :
 
         return if (trimmed.startsWith("<")) {
             val doc = Jsoup.parseBodyFragment(trimmed, baseUrl)
-            doc.select("img").mapIndexedNotNull { i, img ->
-                val finalSrc = img.imgAttr() ?: return@mapIndexedNotNull null
+            doc.select("img, canvas[data-enc]").mapIndexedNotNull { i, img ->
+                val finalSrc = img.imgAttr() ?: img.protectedCanvasSrc() ?: return@mapIndexedNotNull null
                 Page(i, imageUrl = finalSrc)
             }
         } else {
@@ -502,6 +502,13 @@ abstract class InitManga :
                 }
             }.getOrElse { emptyList() }
         }
+    }
+
+    // Older chapters ship <canvas class="imc-protected-canvas"> instead of <img>; the site's
+    // initMangaResolveImgSrc() recovers the URL as atob(data-enc) reversed.
+    private fun Element.protectedCanvasSrc(): String? {
+        val enc = attr("data-enc").takeIf { it.isNotBlank() } ?: return null
+        return String(Base64.decode(enc, Base64.DEFAULT), Charsets.UTF_8).reversed()
     }
 
     private fun fallbackPages(document: Document): List<Page> = document.select("div#chapter-content img, div.chapter-content img, div.reader-area img, div.entry-content img, div#readerarea img").mapIndexedNotNull { i, img ->
