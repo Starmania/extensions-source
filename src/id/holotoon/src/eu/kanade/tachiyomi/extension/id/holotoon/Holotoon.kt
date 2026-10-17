@@ -13,6 +13,7 @@ import keiyoushi.utils.asJsoup
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonElement
 import kotlinx.serialization.json.JsonElement
+import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -23,6 +24,12 @@ import java.util.Calendar
 
 @Source
 abstract class Holotoon : KeiSource() {
+
+    // Cloudflare challenges /read/ pages for a Chrome User-Agent that sends no Chromium
+    // client hint; any Chromium brand passes, the version does not have to match the UA.
+    override fun Headers.Builder.configureHeaders() = apply {
+        set("Sec-CH-UA", "\"Chromium\";v=\"148\", \"Not.A/Brand\";v=\"99\"")
+    }
 
     override suspend fun getPopularManga(page: Int): MangasPage = getBrowsePage(page = page, sort = "popular")
 
