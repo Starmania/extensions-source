@@ -504,8 +504,7 @@ abstract class InitManga :
         }
     }
 
-    // Older chapters ship <canvas class="imc-protected-canvas"> instead of <img>; the site's
-    // initMangaResolveImgSrc() recovers the URL as atob(data-enc) reversed.
+    // Older chapters ship <canvas class="imc-protected-canvas"> instead of <img>
     private fun Element.protectedCanvasSrc(): String? {
         val enc = attr("data-enc").takeIf { it.isNotBlank() } ?: return null
         return String(Base64.decode(enc, Base64.DEFAULT), Charsets.UTF_8).reversed()
