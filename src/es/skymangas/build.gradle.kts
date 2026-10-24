@@ -6,13 +6,17 @@ plugins {
 
 keiyoushi {
     name = "SkyMangas"
-    versionCode = 1
+    versionCode = 2
     contentWarning = ContentWarning.SAFE
     libVersion = "1.6"
-    theme = "mangathemesia"
 
     source {
         lang = "es"
         baseUrl = "https://skymangas.com"
+    }
+
+    deeplink {
+        path("/manhua/..*")
+        path("/leer/..*")
     }
 }
