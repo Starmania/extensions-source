@@ -14,84 +14,80 @@ import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.string
 import keiyoushi.utils.toJsonElement
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.asResponseBody
+import okio.Buffer
+import okio.BufferedSource
+import okio.buffer
+import java.io.IOException
+import okio.Source as OkioSource
 
 @Source
 abstract class OneReader : KeiSource() {
 
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = apply {
         rateLimit(3)
+        addInterceptor(::protectedPageInterceptor)
     }
 
-    private val apiBaseUrl = "https://api.onereader.net".toHttpUrl()
-
-    override suspend fun getPopularManga(page: Int): MangasPage = search(
-        page = page,
-        query = "",
-        order = "az",
-        genre = "",
-        type = "",
-        status = "",
-    )
+    override suspend fun getPopularManga(page: Int): MangasPage = catalog(page, sort = "VIEWS")
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
-        val url = apiUrl("api", "mangas", "home").newBuilder()
-            .addQueryParameter("limit", HOME_LIMIT.toString())
-            .build()
-
-        val mangas = client.get(url).parseAs<List<HomeMangaDto>>().map(HomeMangaDto::toSManga)
-
-        return MangasPage(mangas, hasNextPage = false)
-    }
-
-    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
-        val order = filters.firstInstanceOrNull<OrderFilter>()?.selected() ?: "az"
-        val genre = filters.firstInstanceOrNull<TagFilter>()?.selected().orEmpty()
-        val type = filters.firstInstanceOrNull<TypeFilter>()?.selected().orEmpty()
-        val status = filters.firstInstanceOrNull<StatusFilter>()?.selected().orEmpty()
-
-        return search(page, query, order, genre, type, status)
-    }
-
-    private suspend fun search(
-        page: Int,
-        query: String,
-        order: String,
-        genre: String,
-        type: String,
-        status: String,
-    ): MangasPage {
-        val url = apiUrl("api", "mangas", "search").newBuilder()
+        val url = apiUrl("home", "updates").newBuilder()
             .addQueryParameter("page", page.toString())
             .addQueryParameter("limit", PAGE_SIZE.toString())
-            .addQueryParameter("order", order)
-            .addQueryParameter("role", "standard")
-            .addQueryParameter("search", query.trim())
-            .addQueryParameter("genre", genre)
-            .addQueryParameter("type", type)
-            .addQueryParameter("status", status)
+            .addQueryParameter("filter", "all")
             .build()
 
-        return client.get(url).parseAs<SearchDto>().toMangasPage()
+        return client.get(url).parseAs<HomeUpdatesDto>().toMangasPage()
+    }
+
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage = catalog(
+        page = page,
+        sort = filters.firstInstanceOrNull<OrderFilter>()?.selected() ?: "AZ",
+        query = query.trim(),
+        format = filters.firstInstanceOrNull<TypeFilter>()?.selected().orEmpty(),
+        status = filters.firstInstanceOrNull<StatusFilter>()?.selected().orEmpty(),
+        genre = filters.firstInstanceOrNull<TagFilter>()?.selected().orEmpty(),
+    )
+
+    private suspend fun catalog(
+        page: Int,
+        sort: String,
+        query: String = "",
+        format: String = "",
+        status: String = "",
+        genre: String = "",
+    ): MangasPage {
+        val url = apiUrl("catalog", "page").newBuilder()
+            .addQueryParameter("page", page.toString())
+            .addQueryParameter("limit", PAGE_SIZE.toString())
+            .addQueryParameter("sort", sort)
+            .apply {
+                if (query.isNotEmpty()) addQueryParameter("q", query)
+                if (format.isNotEmpty()) addQueryParameter("format", format)
+                if (status.isNotEmpty()) addQueryParameter("status", status)
+                if (genre.isNotEmpty()) addQueryParameter("genre", genre)
+            }
+            .build()
+
+        return client.get(url).parseAs<CatalogDto>().toMangasPage()
     }
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
         if (url.host != baseUrl.toHttpUrl().host) return null
-        val mangaKey = url.queryParameter("id") ?: return null
+        val id = url.queryParameter("id") ?: return null
 
-        val manga = SManga.create().apply { this.url = mangaKey }
-
-        return fetchMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false)
-            .manga
-            .apply { initialized = true }
+        return client.get(apiUrl("works", id)).parseAs<WorkDetailsDto>().toSManga()
     }
 
-    override fun getMangaUrl(manga: SManga): String = "$baseUrl/manga-details".toHttpUrl().newBuilder()
+    override fun getMangaUrl(manga: SManga): String = "$baseUrl/obra".toHttpUrl().newBuilder()
         .addQueryParameter("id", manga.url)
         .build()
         .toString()
@@ -101,64 +97,76 @@ abstract class OneReader : KeiSource() {
         chapters: List<SChapter>,
         fetchDetails: Boolean,
         fetchChapters: Boolean,
-    ): SMangaUpdate = coroutineScope {
-        val updatedManga = if (fetchDetails) {
-            async {
-                client.get(apiUrl("api", "mangas", manga.url)).parseAs<MangaDto>().toSManga(details = true)
-            }
-        } else {
-            null
-        }
+    ): SMangaUpdate {
+        // One endpoint returns both the work and its chapter list.
+        val details = client.get(apiUrl("works", manga.url)).parseAs<WorkDetailsDto>()
 
-        val updatedChapters = if (fetchChapters) {
-            async {
-                client.get(apiUrl("api", "chapters", manga.url))
-                    .parseAs<Map<String, ChapterDto>>()
-                    .entries
-                    .sortedByDescending { it.key.toDoubleOrNull() ?: Double.NEGATIVE_INFINITY }
-                    .map { it.value.toSChapter(it.key) }
-            }
-        } else {
-            null
-        }
-
-        SMangaUpdate(
-            manga = updatedManga?.await() ?: manga,
-            chapters = updatedChapters?.await() ?: chapters,
+        return SMangaUpdate(
+            manga = if (fetchDetails) details.toSManga() else manga,
+            chapters = if (fetchChapters) details.toSChapters() else chapters,
         )
     }
 
-    override fun getChapterUrl(chapter: SChapter): String {
-        val mangaKey = chapter.memo["id"]!!.string
-        val number = chapter.memo["number"]!!.string
-
-        return "$baseUrl/leitor".toHttpUrl().newBuilder()
-            .addQueryParameter("id", mangaKey)
-            .addQueryParameter("capitulo", number)
-            .build()
-            .toString()
-    }
+    override fun getChapterUrl(chapter: SChapter): String = "$baseUrl/leitor".toHttpUrl().newBuilder()
+        .addQueryParameter("id", chapter.memo["id"]!!.string)
+        .addQueryParameter("cap", chapter.memo["number"]!!.string)
+        .build()
+        .toString()
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val mangaKey = chapter.memo["id"]?.string ?: throw Exception("Atualize a lista de capítulos")
-        val chapterNumber = chapter.memo["number"]!!.string.replace('.', '_')
+        val id = chapter.memo["id"]?.string ?: throw Exception("Atualize a lista de capítulos")
+        val number = chapter.memo["number"]!!.string
 
-        return client.get(apiUrl("api", "chapters", mangaKey, chapterNumber))
-            .parseAs<PagesDto>()
-            .toPages(apiBaseUrl)
+        return client.get(apiUrl("works", id, "chapters", number))
+            .parseAs<ChapterManifestDto>()
+            .toPages(baseUrl.toHttpUrl())
+    }
+
+    // Page URLs answer with a short-lived link to an "ORX3" envelope: 4 magic bytes, a big-endian
+    // count, then the image with its first `count` bytes XORed by a per-request key. The grant in
+    // the page URL is tied to the `or.reader` cookie set by the chapter manifest request.
+    private fun protectedPageInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        if (!request.url.encodedPath.contains("/pages/") || request.url.host != baseUrl.toHttpUrl().host) {
+            return chain.proceed(request)
+        }
+
+        val media = chain.proceed(
+            request.newBuilder().header("Accept", "application/vnd.onereader.media+json").build(),
+        ).parseAs<MediaDto>()
+        if (media.mode != "xor-prefix-v3") throw IOException("Modo de proteção não suportado: ${media.mode}")
+
+        val response = chain.proceed(Request.Builder().url(media.url).headers(request.headers).build())
+        if (!response.isSuccessful) return response
+
+        val source = response.body.source()
+        if (source.readUtf8(4) != "ORX3") throw IOException("Envelope de imagem inválido")
+        val count = source.readInt().toLong()
+        val prefix = if (source.request(count)) source.readByteArray(count) else source.readByteArray()
+        val key = media.key()
+        for (i in prefix.indices) {
+            prefix[i] = (prefix[i].toInt() xor key[i % key.size].toInt()).toByte()
+        }
+
+        val mediaType = media.mediaType()
+        val body = PrefixedSource(Buffer().write(prefix), source).buffer().asResponseBody(mediaType, -1)
+
+        return response.newBuilder()
+            .header("Content-Type", mediaType.toString())
+            .body(body)
+            .build()
+    }
+
+    private class PrefixedSource(private val prefix: Buffer, private val rest: BufferedSource) : OkioSource by rest {
+        override fun read(sink: Buffer, byteCount: Long): Long = if (prefix.size > 0) prefix.read(sink, byteCount) else rest.read(sink, byteCount)
     }
 
     override val supportsFilterFetching get() = true
 
-    override suspend fun fetchFilterData(): JsonElement = coroutineScope {
-        val tags = async { client.get(apiUrl("api", "tags")).parseAs<List<String>>() }
-        val types = async { client.get(apiUrl("api", "types")).parseAs<List<String>>() }
-
-        FilterData(
-            tags = tags.await().filter(String::isNotBlank),
-            types = types.await().filter(String::isNotBlank),
-        ).toJsonElement()
-    }
+    override suspend fun fetchFilterData(): JsonElement = client.get(apiUrl("catalog", "meta"))
+        .parseAs<CatalogMetaDto>()
+        .toFilterData()
+        .toJsonElement()
 
     override fun getFilterList(data: JsonElement?): FilterList {
         val filterData = data?.parseAs<FilterData>()
@@ -167,20 +175,17 @@ abstract class OneReader : KeiSource() {
             buildList {
                 add(OrderFilter())
                 add(StatusFilter())
-                if (filterData != null) {
-                    add(TypeFilter(filterData.types))
-                    add(TagFilter(filterData.tags))
-                }
+                add(TypeFilter())
+                if (filterData != null) add(TagFilter(filterData.tags))
             },
         )
     }
 
-    private fun apiUrl(vararg pathSegments: String): HttpUrl = apiBaseUrl.newBuilder()
+    private fun apiUrl(vararg pathSegments: String): HttpUrl = "$baseUrl/api/reader".toHttpUrl().newBuilder()
         .apply { pathSegments.forEach { addPathSegment(it) } }
         .build()
 
     companion object {
         private const val PAGE_SIZE = 24
-        private const val HOME_LIMIT = 60
     }
 }

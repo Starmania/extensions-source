@@ -6,7 +6,6 @@ import kotlinx.serialization.Serializable
 @Serializable
 internal class FilterData(
     val tags: List<String>,
-    val types: List<String>,
 )
 
 internal open class SelectFilter(
@@ -20,8 +19,10 @@ internal class OrderFilter :
     SelectFilter(
         "Ordenar por",
         listOf(
-            "A-Z" to "az",
-            "Atualizados recentemente" to "recent",
+            "A-Z" to "AZ",
+            "Mais recentes" to "DATE",
+            "Mais lidas" to "VIEWS",
+            "Melhor avaliadas" to "RATING",
         ),
     )
 
@@ -30,21 +31,27 @@ internal class StatusFilter :
         "Status",
         listOf(
             "Todos" to "",
-            "Em lançamento" to "Em Lançamento",
-            "Completo" to "Completo",
-            "Hiato" to "Hiatus",
-            "Cancelado" to "Cancelado",
+            "Em lançamento" to "LANÇANDO",
+            "Completo" to "COMPLETO",
+            "Hiato" to "HIATO",
         ),
     )
 
-internal class TypeFilter(types: List<String>) :
+internal class TypeFilter :
     SelectFilter(
         "Tipo",
-        listOf("Todos" to "") + types.map { it to it },
+        listOf(
+            "Todos" to "",
+            "Webtoon" to "WEBTOON",
+            "Mangá" to "MANGÁ",
+            "Manhua" to "MANHUA",
+            "Manhwa" to "MANHWA",
+            "Shoujo" to "SHOUJO",
+        ),
     )
 
 internal class TagFilter(tags: List<String>) :
     SelectFilter(
-        "Tag",
-        listOf("Todas" to "") + tags.map { it to it },
+        "Gênero",
+        listOf("Todos" to "") + tags.map { it to it },
     )
