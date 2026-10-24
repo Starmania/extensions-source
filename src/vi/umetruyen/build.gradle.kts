@@ -6,13 +6,12 @@ plugins {
 
 keiyoushi {
     name = "UmeTruyen"
-    versionCode = 4
+    versionCode = 10
     contentWarning = ContentWarning.NSFW
     libVersion = "1.6"
-    theme = "manhwaz"
 
     source {
         lang = "vi"
-        baseUrl = "https://umetruyenz.org"
+        baseUrl = "https://umetruyen.com"
     }
 }
