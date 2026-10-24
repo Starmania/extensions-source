@@ -64,13 +64,16 @@ class Manga(
 class Chapter(
     private val id: String,
     private val title: String,
-    private val number: Int,
+    // Sub-chapters come as decimals (91.6), so this can't be an Int.
+    private val number: Double,
     private val createdAt: String,
 ) {
 
     fun toSChapter(slug: String) = SChapter.create().apply {
-        url = "$slug/$number"
-        val baseName = "الفصل $number"
+        // Keep whole numbers as "33", not "33.0", so existing chapter URLs stay the same.
+        val numberText = number.toString().removeSuffix(".0")
+        url = "$slug/$numberText"
+        val baseName = "الفصل $numberText"
         name = if (title == baseName) baseName else "$baseName - $title"
         chapter_number = number.toFloat()
         date_upload = Instant.tryParse(createdAt)
