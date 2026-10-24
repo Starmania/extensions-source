@@ -12,6 +12,7 @@ import kotlin.time.Duration.Companion.seconds
 abstract class YuriOnAir : Madara() {
     override val chapterDateFormat = DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.forLanguageTag("pt-BR"))
     override val chapterMode = ChapterMode.MangaAjax
+    override val ajaxTemplate = "wp-manga/content/content-archive"
 
     override fun OkHttpClient.Builder.configureClient() = rateLimit(1, 2.seconds) { !it.encodedPath.startsWith("/wp-content/uploads/") }
 }
