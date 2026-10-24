@@ -129,8 +129,10 @@ abstract class CuuTruyenMoe :
                 }
             }
 
+            // The site's own `keyword` param (used by its search box) returns HTTP 500;
+            // the underlying query-builder filter still works.
             if (query.isNotBlank()) {
-                addQueryParameter("keyword", query)
+                addQueryParameter("filter[name]", query)
             }
             addQueryParameter("page", page.toString())
         }.build()
