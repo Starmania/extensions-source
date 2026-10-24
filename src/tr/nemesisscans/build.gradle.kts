@@ -6,14 +6,19 @@ plugins {
 
 keiyoushi {
     name = "Nemesis scans"
-    versionCode = 0
+    versionCode = 1
     contentWarning = ContentWarning.SAFE
     libVersion = "1.6"
-    theme = "mangathemesia"
 
     source {
         name = "Nemesisscans"
         lang = "tr"
         baseUrl = "https://nemesisscans.com"
+        // Left MangaThemesia for a custom API; old /manga/<slug>/ entries cannot be mapped to series ids
+        versionId = 2
+    }
+
+    deeplink {
+        path("/series/..*")
     }
 }
