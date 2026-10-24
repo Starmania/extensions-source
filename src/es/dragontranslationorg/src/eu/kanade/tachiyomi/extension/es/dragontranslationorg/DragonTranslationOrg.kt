@@ -1,9 +1,12 @@
 package eu.kanade.tachiyomi.extension.es.dragontranslationorg
 
 import eu.kanade.tachiyomi.multisrc.madara.Madara
+import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.SChapter
 import keiyoushi.annotation.Source
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
+import keiyoushi.utils.asJsoup
 import keiyoushi.utils.parseAs
 import okhttp3.OkHttpClient
 import org.jsoup.nodes.Document
@@ -17,6 +20,14 @@ abstract class DragonTranslationOrg : Madara() {
     override val chapterDateFormat = DateTimeFormatter.ofPattern("MMMM dd, yyyy", Locale.forLanguageTag("es"))
 
     override fun OkHttpClient.Builder.configureClient() = rateLimit(3)
+
+    // The site no longer stores the `_latest_update` meta the ajax sort relies on, so that
+    // query returns nothing; its own archive page still sorts by latest update.
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        val pagePath = if (page > 1) "page/$page/" else ""
+        val document = client.get("$baseUrl/$mangaSubString/$pagePath?m_orderby=latest").asJsoup()
+        return MangasPage(parseArchive(document), document.selectFirst("a.nextpostslink") != null)
+    }
 
     override val filterGenresSelector = ".filters"
     override fun archiveSelector() = "a:has(img.ac-cover)"
