@@ -75,7 +75,8 @@ abstract class Mangago :
     }
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
-        val response = client.get("$baseUrl/genre/all/$page/?f=1&o=1&sortby=update_date&e=")
+        // The genre listing sorted by update_date is served from a stale cache; this is the site's own "Last Updates" page
+        val response = client.get("$baseUrl/list/latest/all/$page/")
         return parseMangasPage(response)
     }
 
