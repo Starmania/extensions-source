@@ -13,6 +13,7 @@ import keiyoushi.utils.getLocalStorage
 import keiyoushi.utils.hmacSha256
 import keiyoushi.utils.parseAs
 import kotlinx.serialization.json.JsonElement
+import okhttp3.CacheControl
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -129,6 +130,17 @@ abstract class WestManga : KeiSource() {
         return tokenCache
     }
 
+    private var visitToken: VisitToken? = null
+
+    // Cloudflare blocks /api/ requests that lack the X-WM-Visit header the web frontend sends.
+    // The token is bound to the client IP and expires after ~30 minutes.
+    private suspend fun visitToken(): String {
+        visitToken?.takeIf { it.expiresAt - System.currentTimeMillis() / 1000 > 300 }
+            ?.let { return it.token }
+        return client.get("$baseUrl/api/visit-token", CacheControl.FORCE_NETWORK).parseAs<VisitToken>()
+            .also { visitToken = it }.token
+    }
+
     private suspend fun apiHeaders(url: HttpUrl, includeToken: Boolean = true): Headers {
         val timestamp = (System.currentTimeMillis() / 1000).toString()
         val message = "wm-api-request"
@@ -139,6 +151,7 @@ abstract class WestManga : KeiSource() {
             if (includeToken) {
                 bearerToken()?.let { set("Authorization", "Bearer $it") }
             }
+            set("X-WM-Visit", visitToken())
             set("x-wm-request-time", timestamp)
             set("x-wm-accses-key", ACCESS_KEY)
             set("x-wm-request-signature", signature)
