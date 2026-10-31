@@ -8,10 +8,11 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
-import keiyoushi.utils.asJsoup
+import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.tryParse
@@ -136,17 +137,14 @@ abstract class ColorcitoScan : KeiSource() {
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val document = client.get(getChapterUrl(chapter)).asJsoup()
-        val images = document.select("img[src*=/serie/], img[src*=%2Fserie%2F]")
-            .map { extractDirectImageUrl(it.attr("src")) }
-            .distinct()
+        // coloresito.site no longer server-renders the reader images; both domains carry them in the Next.js payload
+        val data = client.get(getChapterUrl(chapter), Fetch.DOCUMENT).extractNextJs<ChapterPagesDto>()
+            ?: throw Exception("No se pudo leer el capítulo")
 
-        return images.mapIndexed { index, url ->
+        return data.pages.urlImg.parseAs<List<String>>().mapIndexed { index, url ->
             Page(index, imageUrl = url)
         }
     }
 
     private suspend fun getComicsList(): List<ComicDataDto> = client.get("$baseUrl/api/comics").parseAs<ComicsResponseDto>().response
-
-    private fun extractDirectImageUrl(url: String): String = url.toHttpUrlOrNull()?.queryParameter("url") ?: url
 }

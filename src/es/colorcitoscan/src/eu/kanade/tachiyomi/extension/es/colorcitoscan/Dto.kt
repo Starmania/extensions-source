@@ -126,3 +126,14 @@ class ChapterDto(
         date_upload = Instant.tryParse(createdAt)
     }
 }
+
+@Serializable
+class ChapterPagesDto(
+    val pages: ChapterImagesDto,
+)
+
+// urlImg is a JSON array encoded as a string
+@Serializable
+class ChapterImagesDto(
+    val urlImg: String,
+)
