@@ -75,7 +75,7 @@ abstract class Ono :
     private fun isJwtExpired(jwt: String): Boolean = try {
         val payload = jwt.split('.')[1]
         val json = String(Base64.decode(payload, Base64.URL_SAFE or Base64.NO_WRAP))
-        val exp = Regex("\"exp\":(\\d+)").find(json)!!.groupValues[1].toLong()
+        val exp = JWT_EXP_REGEX.find(json)!!.groupValues[1].toLong()
         // Treat as expired slightly early to avoid mid-request expiry.
         System.currentTimeMillis() / 1000 >= exp - 30
     } catch (_: Exception) {
@@ -387,6 +387,7 @@ abstract class Ono :
     }
 
     companion object {
+        private val JWT_EXP_REGEX = Regex("\"exp\":(\\d+)")
         private const val API_HOST = "ws.ono.live"
         private const val COGNITO_CLIENT_ID = "12kanvg0bocd5hjtuul46phv7s"
 

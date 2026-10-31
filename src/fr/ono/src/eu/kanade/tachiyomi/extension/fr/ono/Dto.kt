@@ -23,7 +23,6 @@ class RankingSeries(
 
 @Serializable
 class SeriesDetail(
-    val id: String,
     val slug: String,
     val title: String,
     val contentType: String,
