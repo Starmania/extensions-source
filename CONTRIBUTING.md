@@ -538,6 +538,7 @@ use case. Each lib is self-documented via KDoc comments in its Kotlin source fil
 | [`lib-speedbinb`](https://github.com/keiyoushi/extensions-source/tree/main/lib/speedbinb)                 | Processes, decrypts, and descrambles SpeedBinb reader payloads                          |
 | [`lib-synchrony`](https://github.com/keiyoushi/extensions-source/tree/main/lib/synchrony)                 | JavaScript deobfuscation via the Synchrony engine (QuickJS sandbox)                     |
 | [`lib-textinterceptor`](https://github.com/keiyoushi/extensions-source/tree/main/lib/textinterceptor)     | Renders plain text or HTML as a PNG image page                                          |
+| [`lib-tilescramble`](https://github.com/keiyoushi/extensions-source/tree/main/lib/tilescramble)           | Reads the tile map from a packed `div.displayImage` script and descrambles the image    |
 | [`lib-unpacker`](https://github.com/keiyoushi/extensions-source/tree/main/lib/unpacker)                   | Unpacks Dean Edwards-packed JavaScript; substring extraction helpers                    |
 
 > [!IMPORTANT]
