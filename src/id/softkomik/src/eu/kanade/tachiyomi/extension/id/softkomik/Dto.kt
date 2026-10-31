@@ -4,14 +4,14 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
-data class LibDataDto(
+class LibDataDto(
     val data: List<MangaDto>,
     val maxPage: Int,
     val page: Int,
 )
 
 @Serializable
-data class MangaDto(
+class MangaDto(
     val gambar: String,
     val title: String,
     @SerialName("title_slug") val titleSlug: String,
@@ -20,7 +20,7 @@ data class MangaDto(
 )
 
 @Serializable
-data class MangaDetailsDto(
+class MangaDetailsDto(
     val gambar: String,
     val title: String,
     val author: String? = null,
@@ -31,17 +31,17 @@ data class MangaDetailsDto(
 )
 
 @Serializable
-data class ChapterDto(
+class ChapterDto(
     val chapter: String,
 )
 
 @Serializable
-data class ChapterPageImagesDto(
+class ChapterPageImagesDto(
     val imageSrc: List<String>,
 )
 
 @Serializable
-data class ChapterPageDataDto(
+class ChapterPageDataDto(
     @SerialName("_id") val id: String,
     val storageInter2: Boolean? = false,
     val backBS3: Boolean? = false,
@@ -69,12 +69,12 @@ class ChapterPropsDataDto(
 )
 
 @Serializable
-data class ChapterListDto(
+class ChapterListDto(
     val chapter: List<ChapterDto>,
 )
 
 @Serializable
-data class SessionDto(
+class SessionDto(
     val ex: Long,
     val sign: String,
     val token: String,
@@ -82,7 +82,7 @@ data class SessionDto(
 )
 
 @Serializable
-data class ContentAccessDto(
+class ContentAccessDto(
     val token: String,
     val sign: String,
 )
