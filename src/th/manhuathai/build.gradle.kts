@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "ManhuaThai"
-    versionCode = 0
+    versionCode = 1
     contentWarning = ContentWarning.SAFE
     libVersion = "1.6"
     theme = "madara"
@@ -19,5 +19,5 @@ keiyoushi {
 
 dependencies {
 
-    implementation(project(":lib:unpacker"))
+    implementation(project(":lib:tilescramble"))
 }
