@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "MangaIsekaiThai"
-    versionCode = 1
+    versionCode = 2
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
     theme = "madara"
@@ -19,5 +19,5 @@ keiyoushi {
 
 dependencies {
 
-    implementation(project(":lib:unpacker"))
+    implementation(project(":lib:tilescramble"))
 }
