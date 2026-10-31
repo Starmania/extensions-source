@@ -17,7 +17,9 @@ import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonElement
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 @Source
@@ -25,10 +27,6 @@ abstract class RocksManga : KeiSource() {
     private val apiUrl get() = baseUrl.replace("://", "://api.")
 
     override val supportsFilterFetching = true
-
-    override fun getMangaUrl(manga: SManga) = baseUrl + manga.url
-
-    override fun getChapterUrl(chapter: SChapter) = baseUrl + chapter.url
 
     // ============================== Listings ==============================
 
@@ -85,6 +83,13 @@ abstract class RocksManga : KeiSource() {
 
     // ============================ Details & chapters ============================
 
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val segments = url.pathSegments
+        if (segments.firstOrNull() != "manga") return null
+        val slug = segments.getOrNull(1) ?: return null
+        return client.get("$baseUrl/manga/$slug").asJsoup().parseDetails().toSManga(apiUrl)
+    }
+
     override suspend fun fetchMangaUpdate(
         manga: SManga,
         chapters: List<SChapter>,
@@ -93,7 +98,7 @@ abstract class RocksManga : KeiSource() {
     ): SMangaUpdate {
         val document = client.get(getMangaUrl(manga)).asJsoup()
 
-        val details = document.extractNextJs<DetailsDto> { it is JsonObject && "readHref" in it }!!.manga
+        val details = document.parseDetails()
         val chapterList = document.extractNextJs<ChapterListDto> { it is JsonObject && "mangaSlug" in it && "chapters" in it }!!
 
         return SMangaUpdate(
@@ -101,6 +106,8 @@ abstract class RocksManga : KeiSource() {
             chapterList.chapters.sortedByDescending { it.id }.map { it.toSChapter(chapterList.mangaSlug) },
         )
     }
+
+    private fun Document.parseDetails() = extractNextJs<DetailsDto> { it is JsonObject && "readHref" in it }!!.manga
 
     // ================================= Pages =================================
 

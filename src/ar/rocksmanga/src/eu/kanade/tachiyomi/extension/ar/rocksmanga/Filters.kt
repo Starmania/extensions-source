@@ -10,8 +10,8 @@ class SortFilter :
     SelectFilter(
         "ترتيب حسب",
         listOf(
-            "آخر التحديثات" to "recently_updated",
             "الأكثر مشاهدة" to "most_viewed",
+            "آخر التحديثات" to "recently_updated",
             "الأعلى تقييماً" to "highest_rated",
             "أبجدياً" to "alphabetical",
             "الأحدث" to "new",
