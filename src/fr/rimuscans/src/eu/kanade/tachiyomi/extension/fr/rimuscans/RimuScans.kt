@@ -90,8 +90,8 @@ abstract class RimuScans :
     }
 
     // =========================== Manga Details ============================
-    // The site dropped its JSON detail API; details, chapters and pages are now
-    // read from the Next.js (App Router) server payload embedded in the pages.
+    // The site has no JSON detail API: details, chapters and pages come from the
+    // Next.js (App Router) server payload embedded in the pages.
 
     override suspend fun fetchMangaUpdate(
         manga: SManga,
