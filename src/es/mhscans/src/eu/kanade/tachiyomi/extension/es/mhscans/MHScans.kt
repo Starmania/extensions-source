@@ -1,60 +1,139 @@
 package eu.kanade.tachiyomi.extension.es.mhscans
 
-import android.content.SharedPreferences
-import android.widget.Toast
-import androidx.preference.PreferenceScreen
-import androidx.preference.SwitchPreferenceCompat
-import eu.kanade.tachiyomi.multisrc.madara.Madara
-import eu.kanade.tachiyomi.source.ConfigurableSource
+import eu.kanade.tachiyomi.source.model.FilterList
+import eu.kanade.tachiyomi.source.model.MangasPage
+import eu.kanade.tachiyomi.source.model.Page
+import eu.kanade.tachiyomi.source.model.SChapter
+import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
+import keiyoushi.network.get
 import keiyoushi.network.rateLimit
-import keiyoushi.utils.getPreferences
+import keiyoushi.source.KeiSource
+import keiyoushi.utils.asJsoup
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
-import java.time.format.DateTimeFormatter
-import java.util.Locale
+import org.jsoup.nodes.Document
+import java.time.ZonedDateTime
 import kotlin.time.Duration.Companion.seconds
 
 @Source
-abstract class MHScans :
-    Madara(),
-    ConfigurableSource {
+abstract class MHScans : KeiSource() {
 
-    override val chapterDateFormat = DateTimeFormatter.ofPattern("dd 'de' MMMM 'de' yyyy", Locale.forLanguageTag("es"))
+    override fun OkHttpClient.Builder.configureClient() = rateLimit(2, 1.seconds)
 
-    override val mangaSubString = "series"
+    override suspend fun getPopularManga(page: Int) = fetchLibrary(page, "views")
 
-    override fun OkHttpClient.Builder.configureClient() = rateLimit(1, 3.seconds)
+    override suspend fun getLatestUpdates(page: Int) = fetchLibrary(page, "updated")
 
-    override val chapterMode = ChapterMode.MangaAjax
+    private suspend fun fetchLibrary(page: Int, sort: String): MangasPage = parseLibrary(client.get("$baseUrl/library?sort=$sort&page=$page", Fetch.DOCUMENT).asJsoup())
 
-    private val preferences: SharedPreferences = getPreferences()
-
-    override fun chapterListSelector(): String {
-        val baseSelector = super.chapterListSelector()
-        val removePremium = preferences.getBoolean(REMOVE_PREMIUM_CHAPTERS, REMOVE_PREMIUM_CHAPTERS_DEFAULT)
-
-        if (!removePremium) {
-            return baseSelector
-        }
-
-        return "$baseSelector:not(.premium)"
-    }
-
-    override fun setupPreferenceScreen(screen: PreferenceScreen) {
-        SwitchPreferenceCompat(screen.context).apply {
-            key = REMOVE_PREMIUM_CHAPTERS
-            title = "Filtrar capítulos de pago"
-            summary = "Oculta automáticamente los capítulos que requieren Taels."
-            setDefaultValue(REMOVE_PREMIUM_CHAPTERS_DEFAULT)
-            setOnPreferenceChangeListener { _, _ ->
-                Toast.makeText(screen.context, "Para aplicar los cambios, actualiza la lista de capítulos", Toast.LENGTH_LONG).show()
-                true
+    override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
+        val url = "$baseUrl/library".toHttpUrl().newBuilder().apply {
+            addQueryParameter("page", page.toString())
+            if (query.isNotBlank()) addQueryParameter("q", query)
+            filters.filterIsInstance<QueryFilter>().forEach { filter ->
+                if (filter.value.isNotEmpty()) addQueryParameter(filter.param, filter.value)
             }
-        }.also { screen.addPreference(it) }
+        }.build()
+        return parseLibrary(client.get(url, Fetch.DOCUMENT).asJsoup())
     }
 
-    companion object {
-        private const val REMOVE_PREMIUM_CHAPTERS = "removePremiumChapters"
-        private const val REMOVE_PREMIUM_CHAPTERS_DEFAULT = true
+    private fun parseLibrary(document: Document): MangasPage {
+        val mangas = document.select(".lib-grid a.comic-card")
+            // Novels are in the same catalogue, but their chapters are text
+            .filterNot { it.selectFirst("span.top-2.left-2")?.text() == "Novel" }
+            .map { card ->
+                SManga.create().apply {
+                    setUrlWithoutDomain(card.absUrl("href"))
+                    title = card.selectFirst("p.leading-snug")!!.text()
+                    thumbnail_url = card.selectFirst("img")?.absUrl("src")
+                }
+            }
+        return MangasPage(mangas, document.selectFirst("a.page-btn[aria-label=Siguiente]") != null)
+    }
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host || url.pathSegments.firstOrNull() != "comics") return null
+        val path = "/comics/${url.pathSegments.getOrNull(1) ?: return null}"
+        return parseDetails(client.get(baseUrl + path, Fetch.DOCUMENT).asJsoup()).apply { this.url = path }
+    }
+
+    override suspend fun fetchMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate = coroutineScope {
+        val details = async { if (fetchDetails) parseDetails(client.get(getMangaUrl(manga), Fetch.DOCUMENT).asJsoup()) else manga }
+        val chapterList = async { if (fetchChapters) fetchChapterList(manga) else chapters }
+        SMangaUpdate(details.await(), chapterList.await())
+    }
+
+    private fun parseDetails(document: Document) = SManga.create().apply {
+        title = document.selectFirst("h1")!!.text()
+        thumbnail_url = document.selectFirst("img.comic-cover__img")?.absUrl("src")
+        description = document.selectFirst("#comic-description")?.text()
+        genre = document.select(".comic-chip").joinToString { it.text() }
+        author = document.selectFirst("a[href^=/groups/]")?.text()
+        status = when (document.selectFirst(".comic-meta__status")?.text()) {
+            "En emisión" -> SManga.ONGOING
+            "Completado" -> SManga.COMPLETED
+            "En hiato" -> SManga.ON_HIATUS
+            "Cancelled" -> SManga.CANCELLED
+            else -> SManga.UNKNOWN
+        }
+    }
+
+    private suspend fun fetchChapterList(manga: SManga): List<SChapter> = buildList {
+        var page = 1
+        do {
+            val response = client.get("${getMangaUrl(manga)}/chapters?page=$page", Fetch.DOCUMENT)
+            val lastPage = response.header("x-pages")!!.toInt()
+            // Locked chapters only link to the login page and carry no data-chapter-id, so there is nothing to open
+            response.asJsoup().select("a[data-chapter-id]").mapTo(this) { row ->
+                SChapter.create().apply {
+                    setUrlWithoutDomain(row.absUrl("href"))
+                    name = row.attr("data-chapter-label")
+                    chapter_number = row.attr("data-chapter-num").toFloat()
+                    date_upload = parseRelativeDate(row.selectFirst("span.tracking-wide")?.text().orEmpty())
+                }
+            }
+        } while (page++ < lastPage)
+    }
+
+    private fun parseRelativeDate(date: String): Long {
+        val match = RELATIVE_DATE.find(date) ?: return 0L
+        val amount = match.groupValues[1].toLong()
+        val now = ZonedDateTime.now()
+        val uploaded = when (match.groupValues[2].lowercase()) {
+            "min" -> now.minusMinutes(amount)
+            "h" -> now.minusHours(amount)
+            "d" -> now.minusDays(amount)
+            "sem" -> now.minusWeeks(amount)
+            "mes" -> now.minusMonths(amount)
+            else -> now.minusYears(amount)
+        }
+        return uploaded.toInstant().toEpochMilli()
+    }
+
+    override suspend fun getPageList(chapter: SChapter): List<Page> = client.get(getChapterUrl(chapter), Fetch.DOCUMENT).asJsoup()
+        .select("img.page-img")
+        .mapIndexed { index, img -> Page(index, imageUrl = img.absUrl("data-src").ifEmpty { img.absUrl("src") }) }
+
+    override fun getFilterList(data: JsonElement?) = FilterList(
+        SortFilter(),
+        TypeFilter(),
+        StatusFilter(),
+        GenreFilter(),
+    )
+
+    private companion object {
+        val RELATIVE_DATE = Regex("""hace (\d+) (min|h|d|sem|mes|a)""", RegexOption.IGNORE_CASE)
     }
 }
