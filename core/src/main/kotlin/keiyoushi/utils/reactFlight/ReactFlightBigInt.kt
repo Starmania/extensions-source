@@ -20,9 +20,5 @@ object ReactFlightBigIntSerializer : KSerializer<BigInteger> {
 
     override fun serialize(encoder: Encoder, value: BigInteger): Unit = throw SerializationException("Stub !")
 
-    override fun deserialize(decoder: Decoder): BigInteger {
-        val raw = decoder.decodeString()
-        return runCatching { BigInteger(raw) }.getOrNull()
-            ?: throw IllegalArgumentException("Failed to parse BigInt: $raw")
-    }
+    override fun deserialize(decoder: Decoder): BigInteger = BigInteger(decoder.decodeString())
 }

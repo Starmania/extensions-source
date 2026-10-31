@@ -78,14 +78,14 @@ private fun resolveNextJsRefs(
         if (element.isString && element.content.startsWith("$") && element.content.length >= 2) {
             val str = element.content
             when {
-                str == "\$undefined" -> JsonNull // JS undefined -> null
+                str == "\$undefined" -> JsonNull
                 // Non-finite / negative-zero -> strip '$', keep token as string for ReactFlightNumber.
                 // JSON has no Infinity/NaN, so they can't live in the JsonElement tree as numbers.
                 str == "\$Infinity" || str == "\$-Infinity" || str == "\$NaN" || str == "\$-0" ->
                     JsonPrimitive(str.substring(1))
-                str[1] == '$' -> JsonPrimitive(str.substring(1)) // Escaped '$' -> keep one
-                str[1] == 'D' -> JsonPrimitive(str.substring(2)) // Date -> strip '$D' to expose ISO-8601 string
-                str[1] == 'n' -> JsonPrimitive(str.substring(2)) // BigInt -> strip '$n' for ReactFlightBigInt
+                str[1] == '$' -> JsonPrimitive(str.substring(1))
+                str[1] == 'D' -> JsonPrimitive(str.substring(2))
+                str[1] == 'n' -> JsonPrimitive(str.substring(2))
                 str[1] == 'Q' -> resolveMapRef(str.substring(2), chunkCache, modelCache, resolving) ?: element
                 str[1] == 'W' -> resolveSetRef(str.substring(2), chunkCache, modelCache, resolving) ?: element
                 str[1] == 'L' -> resolveModelRef(str.substring(2), chunkCache, modelCache, resolving) ?: element
@@ -274,7 +274,6 @@ private fun extractRscPayloads(
                 pos++
             }
 
-            // Extract the content and cache it by its hex ID locally
             val chunkContent = body.substring(start, pos)
             chunkCache[id] = chunkContent
 
