@@ -11,7 +11,6 @@ import keiyoushi.utils.parseAs
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -22,12 +21,8 @@ import kotlin.time.Duration.Companion.minutes
 abstract class LikeManga : MadaraNoAjax() {
     override val supportsPostId = false
     override val chapterMode = ChapterMode.MangaAjax
-    override val filterNonMangaItems = false
 
     override fun OkHttpClient.Builder.configureClient() = rateLimit(permits = 60, period = 1.minutes) { it.encodedPath.startsWith("/api/") }
-
-    // The image CDN answers 403 to requests carrying Origin
-    override fun Headers.Builder.configureHeaders(): Headers.Builder = removeAll("Origin")
 
     // Lists mix in an advert card that links off-site
     override fun archiveSelector() = "div.page-item-detail:not(.custom-item-ad), .c-tabs-item__content"
