@@ -55,7 +55,6 @@ class ChapterEntry(
     val id: String,
     val number: Int,
     val title: String? = null,
-    val accessType: String? = null,
     val releasedAt: String? = null,
 )
 
