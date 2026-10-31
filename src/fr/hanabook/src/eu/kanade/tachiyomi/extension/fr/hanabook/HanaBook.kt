@@ -320,18 +320,18 @@ abstract class HanaBook :
     }
 
     private fun stripHtml(html: String): String = html
-        .replace(Regex("<br\\s*/?>"), "\n")
-        .replace(Regex("</p>"), "\n\n")
-        .replace(Regex("<li>"), "• ")
-        .replace(Regex("</li>"), "\n")
-        .replace(Regex("<[^>]+>"), "")
+        .replace(BR_REGEX, "\n")
+        .replace("</p>", "\n\n")
+        .replace("<li>", "• ")
+        .replace("</li>", "\n")
+        .replace(TAG_REGEX, "")
         .replace("&nbsp;", " ")
         .replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
-        .replace(Regex("\n{3,}"), "\n\n")
+        .replace(BLANK_LINES_REGEX, "\n\n")
         .trim()
 
     // ============================== Chapters ==============================
@@ -396,7 +396,7 @@ abstract class HanaBook :
         }
         return data.images.mapIndexed { i, img ->
             val imageUrl = "$blImgUrl?p=${img.param}&k=$identityKey"
-            Page(i, "", imageUrl)
+            Page(i, imageUrl = imageUrl)
         }
     }
 
@@ -440,6 +440,9 @@ abstract class HanaBook :
     companion object {
         private const val EMAIL_KEY = "hb_email"
         private const val PASSWORD_KEY = "hb_password"
+        private val BR_REGEX = Regex("<br\\s*/?>")
+        private val TAG_REGEX = Regex("<[^>]+>")
+        private val BLANK_LINES_REGEX = Regex("\n{3,}")
     }
 }
 

@@ -91,23 +91,6 @@ class ProduitResponse(
 )
 
 @Serializable
-class EbookMetaResponse(
-    val success: Boolean = false,
-    val ebook: EbookMeta? = null,
-    val message: String? = null,
-)
-
-@Serializable
-class EbookMeta(
-    @SerialName("ref_book") val refBook: Int,
-    @SerialName("titre_book") val titreBook: String,
-    val seo: String? = null,
-    val demo: Int = 0,
-    @SerialName("max_page") val maxPage: Int = 0,
-    @SerialName("ebook_abo") val ebookAbo: Int = 0,
-)
-
-@Serializable
 class Ebook(
     val ref: Int,
     val titre: String,
