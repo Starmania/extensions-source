@@ -17,7 +17,6 @@ class LatestApiResponse(
 
 @Serializable
 class PopularMangaData(
-    val id: String,
     val title: String,
     val slug: String,
 )

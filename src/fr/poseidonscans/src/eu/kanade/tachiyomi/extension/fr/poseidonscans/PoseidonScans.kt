@@ -49,8 +49,6 @@ abstract class PoseidonScans :
         return "$baseUrl/api/covers/$this"
     }
 
-    // found /manga/all too
-
     // =============================== Latest ===============================
 
     override suspend fun getLatestUpdates(page: Int): MangasPage {
@@ -70,7 +68,7 @@ abstract class PoseidonScans :
     // ============================== Popular ===============================
 
     override suspend fun getPopularManga(page: Int): MangasPage {
-        val mangaDtos = client.get(baseUrl, rscHeaders).extractNextJs<List<PopularMangaData>>() ?: throw Exception("Cant scape data from Next.js")
+        val mangaDtos = client.get(baseUrl, rscHeaders).extractNextJs<List<PopularMangaData>>() ?: throw Exception("Can't scrape data from Next.js")
 
         val mangas = mangaDtos.map { mangaDto ->
             SManga.create().apply {
@@ -98,7 +96,7 @@ abstract class PoseidonScans :
 
     private suspend fun fetchDetails(manga: SManga): SManga {
         val document = client.get(getMangaUrl(manga)).asJsoup()
-        val mangaDto = document.extractNextJs<MangaDetailsData>() ?: throw Exception("Cant scape data from Next.js")
+        val mangaDto = document.extractNextJs<MangaDetailsData>() ?: throw Exception("Can't scrape data from Next.js")
 
         return SManga.create().apply {
             title = mangaDto.title
@@ -142,7 +140,7 @@ abstract class PoseidonScans :
     }
 
     fun chapterListRsc(rscBody: String): List<SChapter> {
-        val mangaPageDto = rscBody.extractNextJsRsc<MangaPageDetailsData>() ?: throw Exception("Cant scape data from Next.js")
+        val mangaPageDto = rscBody.extractNextJsRsc<MangaPageDetailsData>() ?: throw Exception("Can't scrape data from Next.js")
 
         val showPremium = preferences.getBoolean(
             SHOW_PREMIUM_KEY,
@@ -199,7 +197,7 @@ abstract class PoseidonScans :
     // =============================== Pages ================================
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val pageDataDto = client.get(getChapterUrl(chapter), rscHeaders).extractNextJs<PageData>() ?: throw Exception("Cant scape data from Next.js")
+        val pageDataDto = client.get(getChapterUrl(chapter), rscHeaders).extractNextJs<PageData>() ?: throw Exception("Can't scrape data from Next.js")
         if (pageDataDto.currentChapter.isLocked) {
             if (pageDataDto.sessionStatus == "unauthenticated") {
                 throw Exception("This chapter is premium. Please connect via the WebView to view.")
