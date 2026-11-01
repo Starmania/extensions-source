@@ -8,6 +8,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.lib.unpacker.Unpacker
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.post
 import keiyoushi.source.KeiSource
@@ -169,16 +170,17 @@ abstract class MMLook : KeiSource() {
         return chapters
     }
 
-    private fun SChapter.fullUrl(): String {
+    private fun SChapter.fullUrl(host: String = baseUrl): String {
         val url = this.url
         if (url.startsWith('/')) throw Exception("请刷新章节列表")
-        return "$baseUrl/$url.html"
+        return "$host/$url.html"
     }
 
     override fun getChapterUrl(chapter: SChapter) = chapter.fullUrl().certificateWorkaround()
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val document = client.get(chapter.fullUrl()).asJsoup()
+        // The mobile page cuts recent chapters to 3 images and tells the reader to install the app
+        val document = client.get(chapter.fullUrl(desktopUrl), Fetch.DOCUMENT).asJsoup()
         val id = document.selectFirst(".readerContainer")!!.attr("data-id").toInt()
         return document.selectFirst("script:containsData(eval)")!!.data()
             .let(Unpacker::unpack)
