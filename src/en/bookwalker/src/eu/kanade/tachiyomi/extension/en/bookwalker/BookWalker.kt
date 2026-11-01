@@ -31,6 +31,7 @@ import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
 import keiyoushi.lib.e4p.E4PInterceptor
 import keiyoushi.lib.e4p.E4PManifestReader
+import keiyoushi.network.Fetch
 import keiyoushi.network.post
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.getPreferencesLazy
@@ -40,6 +41,7 @@ import keiyoushi.utils.toJsonElement
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Response
@@ -200,6 +202,19 @@ abstract class BookWalker :
         }.toProtoRequestBody(),
     ).toMangasPage()
 
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host || url.pathSegments.firstOrNull() != "series") return null
+        val id = url.pathSegments.getOrNull(1) ?: return null
+
+        return mangaDetails("CNT_$id").info.toSManga(720)
+    }
+
+    private suspend fun mangaDetails(id: String) = client.post(
+        endpoint("ContentService/Details"),
+        Fetch.XHR,
+        MangaDetailsRequestDto(id).toProtoRequestBody(),
+    ).parseAsProto<MangaDetailsResponseDto>()
+
     override suspend fun fetchMangaUpdate(
         manga: SManga,
         chapters: List<SChapter>,
@@ -220,10 +235,7 @@ abstract class BookWalker :
             if (!fetchDetails) return@async manga
 
             // Main details
-            val details = client.post(
-                endpoint("ContentService/Details"),
-                MangaDetailsRequestDto(manga.url.toMangaId()).toProtoRequestBody(),
-            ).parseAsProto<MangaDetailsResponseDto>()
+            val details = mangaDetails(manga.url.toMangaId())
 
             details.info.toSManga(1200).apply {
                 status = details.status
