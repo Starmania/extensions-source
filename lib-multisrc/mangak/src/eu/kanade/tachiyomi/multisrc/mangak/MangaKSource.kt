@@ -11,6 +11,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.extractNextJs
@@ -23,6 +24,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -146,6 +148,16 @@ abstract class MangaKSource :
         val response = client.get(url)
         val dto = response.parseAs<SearchResponseDto>()
         return MangasPage(dto.items.map { it.toSManga() }, dto.hasNext)
+    }
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        val slug = url.pathSegments.first().ifEmpty { return null }
+        val response = client.get("$baseUrl/$slug", Fetch.DOCUMENT)
+        val dto = response.extractNextJs<NextJsDto> {
+            it is JsonObject && "pageProps" in it
+        }
+
+        return dto?.pageProps?.initialManga?.toSManga()
     }
 
     // ======================= Details & Chapters ==========================
