@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.extension.th.nekopost
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonPrimitive
 
 @Serializable
 class EditorProject(
@@ -47,12 +48,7 @@ class ChapterInfoRequest(
 
 @Serializable
 class RawChapterInfo(
-    @SerialName("chapterId")
-    val chapterId: String,
-    @SerialName("pageItem")
     val pageItem: List<RawPageItem>,
-    @SerialName("projectId")
-    val projectId: String,
 )
 
 @Serializable
@@ -75,12 +71,9 @@ class RawLatestChapter(
 
 @Serializable
 class RawPageItem(
-    @SerialName("pageName")
-    val pageName: String? = null,
-    @SerialName("fileName")
-    val fileName: String? = null,
-    @SerialName("pageNo")
-    val pageNo: String,
+    val pageName: String,
+    // A number on older chapters, a string on newer ones.
+    val pageNo: JsonPrimitive,
 )
 
 @Serializable

@@ -7,6 +7,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.post
 import keiyoushi.source.KeiSource
@@ -14,6 +15,7 @@ import keiyoushi.utils.cryptoJsDecrypt
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonRequestBody
 import keiyoushi.utils.tryParse
+import kotlinx.serialization.json.int
 import okhttp3.HttpUrl
 import okhttp3.Response
 import kotlin.time.Instant
@@ -253,20 +255,18 @@ abstract class Nekopost : KeiSource() {
         val segments = chapter.url.split('/')
         val request = ChapterInfoRequest(segments[0].toInt(), segments[1].toInt())
 
-        val response = client.post("$baseUrl/handler/cinfo", apiHeaders, request.toJsonRequestBody())
+        val response = client.post("$baseUrl/api/handler/cinfo", apiHeaders, Fetch.XHR, request.toJsonRequestBody())
 
         // Not JSON: the body is base64 of a CryptoJS payload, so it has to be read as text and
         // decrypted before it can be parsed.
         val decrypted = response.body.string().cryptoJsDecrypt(CIPHER_PASSPHRASE)
 
-        val info = decrypted.parseAs<RawChapterInfo>()
-        val base = "${fileHost(info.projectId.toInt())}/collectManga/${info.projectId}/${info.chapterId}"
-
+        // pageName is the full signed URL: without its verify token the file host answers 403.
         // The site's own reader sorts by pageNo rather than trusting the returned order.
-        return info.pageItem
-            .sortedBy { it.pageNo.toInt() }
+        return decrypted.parseAs<RawChapterInfo>().pageItem
+            .sortedBy { it.pageNo.int }
             .mapIndexed { index, item ->
-                Page(index, imageUrl = "$base/${item.pageName ?: item.fileName}")
+                Page(index, imageUrl = item.pageName)
             }
     }
 
