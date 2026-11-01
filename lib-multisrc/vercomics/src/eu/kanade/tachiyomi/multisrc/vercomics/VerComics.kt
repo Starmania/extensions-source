@@ -8,10 +8,13 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import eu.kanade.tachiyomi.source.model.UpdateStrategy
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
+import keiyoushi.utils.firstInstanceOrNull
 import kotlinx.serialization.json.JsonElement
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -65,23 +68,30 @@ abstract class VerComics : KeiSource() {
             return searchMangaParse(response.asJsoup())
         }
 
-        filters.forEach { filter ->
-            when (filter) {
-                is GenreFilter -> {
-                    val uriPart = filter.toUriPart()
-                    if (uriPart.isNotEmpty()) {
-                        url.addPathSegments(genreSuffix)
-                        url.addPathSegments(uriPart)
-                        url.addPathSegments("page")
-                        url.addPathSegments(page.toString())
-                    }
-                }
-                else -> {}
-            }
-        }
+        // The home page ignores /page/N, so listing everything has to go through popular
+        val genre = filters.firstInstanceOrNull<GenreFilter>()?.toUriPart().orEmpty()
+        if (genre.isEmpty()) return getPopularManga(page)
+
+        url.addPathSegments(genreSuffix)
+        url.addPathSegments(genre)
+        url.addPathSegments("page")
+        url.addPathSegments(page.toString())
 
         val response = client.get(url.build())
         return searchMangaParse(response.asJsoup())
+    }
+
+    override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
+        if (url.host != baseUrl.toHttpUrl().host) return null
+
+        val document = client.get(url, Fetch.DOCUMENT).asJsoup()
+        document.selectFirst(detailsSelector) ?: return null
+
+        return SManga.create().apply {
+            setUrlWithoutDomain(document.location())
+            title = document.selectFirst("h1")!!.text()
+            thumbnail_url = document.selectFirst(pageListSelector)?.imgAttr()
+        }
     }
 
     private fun searchMangaParse(document: Document): MangasPage {
