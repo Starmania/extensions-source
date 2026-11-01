@@ -14,7 +14,6 @@ abstract class TonizuToon : Madara() {
     override val chapterDateFormat = DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.ROOT)
     override val chapterMode = ChapterMode.MangaAjax
 
-    override val mangaDetailsSelectorTitle = "#manga-title"
     override val mangaDetailsSelectorAuthor = ".summary-heading:contains(Yazar) ~ .summary-content"
     override val mangaDetailsSelectorStatus = ".summary-heading:contains(Durum) ~ .summary-content"
 
