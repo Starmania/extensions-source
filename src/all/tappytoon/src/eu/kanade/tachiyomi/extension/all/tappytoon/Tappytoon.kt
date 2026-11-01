@@ -8,6 +8,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
@@ -56,16 +57,25 @@ abstract class Tappytoon : KeiSource() {
         .set("Origin", "https://www.tappytoon.com")
 
     private var apiHeaders: Headers? = null
+    private var apiHeadersSession: String? = null
 
-    private suspend fun apiHeaders(): Headers = apiHeaders ?: run {
-        val data = client.get(baseUrl).asJsoup().getElementById("__NEXT_DATA__")!!
+    // __TST__ holds the session and changes whenever the site is opened, so a login in WebView
+    // shows up here. The bearer token in the page is anonymous until then.
+    private fun sessionCookie() = client.cookieJar.loadForRequest(baseUrl.toHttpUrl())
+        .firstOrNull { it.name == "__TST__" }?.value
+
+    private suspend fun apiHeaders(): Headers = apiHeaders?.takeIf { sessionCookie() == apiHeadersSession } ?: run {
+        val data = client.get(baseUrl, Fetch.DOCUMENT).asJsoup().getElementById("__NEXT_DATA__")!!
         val axiosHeaders = data.data().parseAs<NextData>().props.initialState.axios.headers
         headers.newBuilder()
             .set("Accept-Language", lang)
             .set("Authorization", axiosHeaders.authorization)
             .set("X-Device-Uuid", axiosHeaders.deviceUuid)
             .build()
-            .also { apiHeaders = it }
+            .also {
+                apiHeaders = it
+                apiHeadersSession = sessionCookie()
+            }
     }
 
     private var nextUrl: String? = null
