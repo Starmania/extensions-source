@@ -8,6 +8,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.network.Fetch
 import keiyoushi.network.get
 import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
@@ -165,9 +166,13 @@ abstract class CapibaraTraductor : KeiSource() {
 
         val result = client.get("$baseUrl/api/$seriesPath/chapter/$chapterSlug/pages", getScanHeaders(organizationSlug))
             .parseAs<Data<List<PageDto>>>()
-        return result.data.mapIndexed { i, page ->
-            Page(i, imageUrl = decodePageUrl(page.pg, result.rv!!, i))
-        }
+        val key = parsePageKey(result.ls!!, client.get(baseUrl, Fetch.DOCUMENT).body.string())
+        val hiddenPages = result.lh?.let(::parseHiddenPages).orEmpty()
+
+        return result.data
+            .mapIndexed { i, page -> decodePageUrl(page.ph, key, i, page.id) }
+            .filterIndexed { i, _ -> i !in hiddenPages }
+            .mapIndexed { i, url -> Page(i, imageUrl = url) }
     }
 
     override val supportsRelatedMangas get() = true
