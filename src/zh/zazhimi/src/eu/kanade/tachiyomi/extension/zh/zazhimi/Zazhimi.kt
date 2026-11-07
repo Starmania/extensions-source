@@ -17,6 +17,7 @@ import kotlinx.serialization.json.JsonElement
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import java.lang.IllegalStateException
+import java.net.URLEncoder
 
 @Source
 abstract class Zazhimi : KeiSource() {
@@ -54,11 +55,13 @@ abstract class Zazhimi : KeiSource() {
                 .addQueryParameter("c", filters[1].toString())
                 .addQueryParameter("m", filters[2].toString())
         } else {
-            url.addPathSegment("search.php").addQueryParameter("k", query)
+            // the API only matches keywords percent-encoded as GBK, a UTF-8 CJK or kana query finds nothing
+            url.addPathSegment("search.php").addEncodedQueryParameter("k", URLEncoder.encode(query, "GBK"))
         }
         url.addQueryParameter("p", page.toString()).addQueryParameter("s", "20")
         val result = client.get(url.build(), Fetch.XHR).parseAs<SearchResponse>()
-        return MangasPage(result.magazine.map(SearchItem::toSManga), true)
+        val mangas = result.magazine.map(SearchItem::toSManga)
+        return MangasPage(mangas, mangas.isNotEmpty())
     }
 
     // Manga Detail Page / Chapters Page
