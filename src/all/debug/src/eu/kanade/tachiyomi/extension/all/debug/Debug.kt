@@ -205,11 +205,11 @@ abstract class Debug : KeiSource() {
     )
 
     /** Builds a page url rendering what tls.peet.ws received for a request sent as [fetch], from [from] if set. */
-    private fun fetchPage(index: Int, baseInt: Long, fetch: String, from: String? = null) = Page(
+    private fun fetchPage(index: Int, baseInt: String, fetch: String, from: String? = null) = Page(
         index,
         "",
         "https://tls.peet.ws/api/all".toHttpUrl().newBuilder()
-            .addQueryParameter("baseInt", baseInt.toString())
+            .addQueryParameter("baseInt", baseInt)
             .addQueryParameter("fetch", fetch)
             .apply { if (from != null) addQueryParameter("from", from) }
             .fragment("render_text")
@@ -277,16 +277,16 @@ abstract class Debug : KeiSource() {
     }
 
     // Page List Route
+    // The refresh time ends chapter urls and goes into every page url: Mihon caches page lists by chapter url and
+    // images by page url, so each refresh loads everything again.
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        val request = GET(baseUrl + chapter.url, headers)
-        val url = request.url.toString()
-        val baseInt = url.substringAfterLast("/").toLongOrNull() ?: System.currentTimeMillis()
-        return when {
-            url.contains("/passive/1") -> listOf(
+        val baseInt = chapter.url.substringAfterLast("/")
+        return when (chapter.url.substringBeforeLast("/")) {
+            "/passive/1" -> listOf(
                 Page(0, "", "https://tls.peet.ws/api/all?baseInt=$baseInt#render_text"),
                 Page(1, "", "https://tls.peet.ws/api/all?baseInt=$baseInt#render_gif"),
             )
-            url.contains("/passive/2") -> listOf(
+            "/passive/2" -> listOf(
                 fetchPage(0, baseInt, "DOCUMENT"),
                 fetchPage(1, baseInt, "XHR"),
                 fetchPage(2, baseInt, "XHR", "https://tls.peet.ws/"),
@@ -296,16 +296,16 @@ abstract class Debug : KeiSource() {
                 fetchPage(6, baseInt, "NONE"),
             )
 
-            url.contains("/active/1") -> listOf(Page(0, "", "https://tls.peet.ws/api/all?"))
-            url.contains("/active/2") -> listOf(
-                Page(0, "", "https://deviceandbrowserinfo.com/are_you_a_bot"),
-                Page(1, "", "https://fingerprint-scan.com/fpscanner/demo"),
+            "/active/1" -> listOf(Page(0, "", "https://tls.peet.ws/api/all?baseInt=$baseInt"))
+            "/active/2" -> listOf(
+                Page(0, "", "https://deviceandbrowserinfo.com/are_you_a_bot?baseInt=$baseInt"),
+                Page(1, "", "https://fingerprint-scan.com/fpscanner/demo?baseInt=$baseInt"),
             )
-            url.contains("/active/3") -> listOf(Page(0, "", "https://google.com"))
+            "/active/3" -> listOf(Page(0, "", "https://google.com/?baseInt=$baseInt"))
 
-            url.contains("/webview/1") -> listOf(webviewPage(0, "https://tls.peet.ws/api/all?baseInt=$baseInt"))
-            url.contains("/webview/2") -> listOf(webviewPage(0, "https://tls.peet.ws/api/all?baseInt=$baseInt", HIGH_ENTROPY_SCRIPT))
-            url.contains("/webview/3") -> listOf(Page(0, "", "https://browser-fingerprinting.doesdev.fr/?auto&baseInt=$baseInt#fingerprint_qr"))
+            "/webview/1" -> listOf(webviewPage(0, "https://tls.peet.ws/api/all?baseInt=$baseInt"))
+            "/webview/2" -> listOf(webviewPage(0, "https://tls.peet.ws/api/all?baseInt=$baseInt", HIGH_ENTROPY_SCRIPT))
+            "/webview/3" -> listOf(Page(0, "", "https://browser-fingerprinting.doesdev.fr/?auto&baseInt=$baseInt#fingerprint_qr"))
 
             else -> emptyList()
         }
