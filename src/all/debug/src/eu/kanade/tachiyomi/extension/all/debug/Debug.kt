@@ -18,6 +18,8 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import keiyoushi.annotation.Source
+import keiyoushi.lib.cronet.cronet
+import keiyoushi.lib.cronet.isCronet
 import keiyoushi.network.Fetch
 import keiyoushi.network.fetch
 import keiyoushi.source.KeiSource
@@ -62,8 +64,8 @@ abstract class Debug : KeiSource() {
             val textResponse = response.body.string()
             Log.d(LOG_TAG, "Original text response:\n$textResponse")
 
-            val label = httpUrl.queryParameter("fetch")?.let { "Fetch: $it ${httpUrl.queryParameter("from").orEmpty()}\n\n" }
-            val bitmap = textToBitmap(label.orEmpty() + textResponse)
+            val fetch = httpUrl.queryParameter("fetch")?.let { "Fetch: $it ${httpUrl.queryParameter("from").orEmpty()}\n" }
+            val bitmap = textToBitmap("${fetch.orEmpty()}Cronet: ${response.isCronet}\n\n$textResponse")
 
             return@addInterceptor response.newBuilder().code(200)
                 .body(bitmap.toPng().toResponseBody("image/png".toMediaTypeOrNull())).build()
@@ -100,7 +102,7 @@ abstract class Debug : KeiSource() {
 
         // Proceed normally for any other requests (like the Active Analysis image endpoints)
         chain.proceed(request)
-    }
+    }.apply { if (name.endsWith("(Cronet)")) cronet() }
 
     // Pages with a "fetch" parameter go out as that Fetch kind, coming from the "from" page if set.
     override fun getImageRequest(page: Page): Request {
