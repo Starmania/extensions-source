@@ -6,7 +6,7 @@ plugins {
 
 keiyoushi {
     name = "Debug"
-    versionCode = 2
+    versionCode = 3
     contentWarning = ContentWarning.NSFW
     libVersion = "1.6"
 
@@ -14,4 +14,8 @@ keiyoushi {
         lang = "all"
         baseUrl = "https://tls.peet.ws/api/all"
     }
+}
+
+dependencies {
+    implementation("com.google.zxing:core:3.5.3")
 }
