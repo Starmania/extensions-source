@@ -243,61 +243,35 @@ abstract class Debug : KeiSource() {
         return MangasPage(mangas, false)
     }
 
+    // Every refresh lists chapters under new urls, so Mihon shows them as fresh ones.
     override suspend fun fetchMangaUpdate(manga: SManga, chapters: List<SChapter>, fetchDetails: Boolean, fetchChapters: Boolean): SMangaUpdate {
         val baseInt = System.currentTimeMillis()
-        val chapters = mutableListOf<SChapter>()
-
-        if (manga.url.contains("/passive")) {
-            chapters.add(
-                SChapter.create().apply {
-                    name = "1. Tls.peet.ws (Rendered Output)"
-                    url = "/passive/1/$baseInt"
-                },
+        val names = when {
+            manga.url.contains("/passive") -> listOf(
+                "1. Tls.peet.ws (Rendered Output)",
+                "2. Fetch kinds (Rendered Output)",
             )
-            chapters.add(
-                SChapter.create().apply {
-                    name = "2. Fetch kinds (Rendered Output)"
-                    url = "/passive/2/$baseInt"
-                },
+            manga.url.contains("/active") -> listOf(
+                "1. Tls.peet.ws",
+                "2. Device & Browser Info",
+                "3. Web Browser",
             )
-        } else if (manga.url.contains("/active")) {
-            chapters.add(
-                SChapter.create().apply {
-                    name = "1. Tls.peet.ws"
-                    url = "/active/1/$baseInt"
-                },
+            manga.url.contains("/webview") -> listOf(
+                "1. Tls.peet.ws (Rendered Output)",
+                "2. High Entropy Values",
+                "3. Browser Fingerprinting Report (QR)",
             )
-            chapters.add(
-                SChapter.create().apply {
-                    name = "2. Device & Browser Info"
-                    url = "/active/2/$baseInt"
-                },
-            )
-            chapters.add(
-                SChapter.create().apply {
-                    name = "3. Web Browser"
-                    url = "/active/3/$baseInt"
-                },
-            )
-        } else if (manga.url.contains("/webview")) {
-            chapters.add(
-                SChapter.create().apply {
-                    name = "1. Tls.peet.ws (Rendered Output)"
-                    url = "/webview/1/$baseInt"
-                },
-            )
-            chapters.add(
-                SChapter.create().apply {
-                    name = "2. High Entropy Values"
-                    url = "/webview/2/$baseInt"
-                },
-            )
-            chapters.add(
-                SChapter.create().apply {
-                    name = "3. Browser Fingerprinting Report (QR)"
-                    url = "/webview/3/$baseInt"
-                },
-            )
+            else -> emptyList()
+        }
+        val chapters = names.mapIndexed { i, chapterName ->
+            SChapter.create().apply {
+                name = chapterName
+                url = "${manga.url}/${i + 1}/$baseInt"
+                // -2 keeps Mihon from reading a number off the name: with one, a new chapter takes the read state
+                // and fetch date of the removed chapter of that number, so it never shows as new.
+                chapter_number = -2f
+                date_upload = baseInt
+            }
         }
         return SMangaUpdate(manga, chapters.reversed())
     }
